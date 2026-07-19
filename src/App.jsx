@@ -3353,7 +3353,14 @@ export default function BitAffairs() {
   useEffect(() => {
     if (!session || !supabaseConfigured) return;
 
-    const unsubscribe = subscribeToActivity((table, payload) => {
+    // Defensive: a blocked or failed realtime connection (misconfigured CSP,
+    // flaky network, Supabase project paused, etc.) should degrade to "no
+    // live updates" — not take down the rest of the app. A CSP-blocked
+    // WebSocket in particular throws synchronously per spec, so this can't
+    // just rely on a .catch() on a promise; it needs an actual try/catch.
+    let unsubscribe = () => {};
+    try {
+      unsubscribe = subscribeToActivity((table, payload) => {
       const row = payload.new && Object.keys(payload.new).length ? payload.new : payload.old;
       const affectedEventId = row?.event_id;
       if (!affectedEventId) return;
@@ -3397,7 +3404,10 @@ export default function BitAffairs() {
         setNotifications((prev) => [...prev.slice(-19), { id, text }]);
         setTimeout(() => setNotifications((prev) => prev.filter((n) => n.id !== id)), 7000);
       }
-    });
+      });
+    } catch (err) {
+      console.error("Failed to open realtime subscription — live updates disabled for this session", err);
+    }
 
     return unsubscribe;
   }, [session, supabaseConfigured]);
