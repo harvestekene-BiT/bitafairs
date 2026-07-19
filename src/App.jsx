@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   ChevronLeft, ChevronRight, Plus, X, Users, Calendar, MapPin,
-  Circle, CheckCircle2, Send, Stamp, FileText,
+  Circle, CheckCircle2, Send, Stamp, FileText, Lock,
   Wallet, ListChecks, Eye, Building2, Truck, Printer, Mail, Phone,
   MessageCircle, ImagePlus
 } from "lucide-react";
@@ -18,13 +18,14 @@ import {
   clientDisapproveProposal as sbClientDisapproveProposal,
   requestApproval as sbRequestApproval,
   releaseApprovalToClient as sbReleaseApprovalToClient,
-  clientApproveMilestone as sbClientApproveMilestone,
+  clientApproveMilestone as sbClientApproveMilestone, clientDisapproveMilestone as sbClientDisapproveMilestone,
   sendMessage as sbSendMessage,
   addVendor as sbAddVendor, cycleVendorStatus as sbCycleVendorStatus, updateVendorPhone as sbUpdateVendorPhone,
   createEvent as sbCreateEvent, inviteClient as sbInviteClient,
-  invitePlanner, fetchTeamMembers, updatePlannerRole,
-  generateClientCode, redeemClientCode,
+  invitePlanner, fetchTeamMembers, updatePlannerRole, removePlanner,
+  generateClientCode, redeemClientCode, subscribeToActivity,
   deleteEvent as sbDeleteEvent, addTask as sbAddTask, deleteTask as sbDeleteTask,
+  requestTask as sbRequestTask, dismissTaskRequest as sbDismissTaskRequest, approveTaskRequest as sbApproveTaskRequest,
   addProposalItem as sbAddProposalItem, updateProposalItem as sbUpdateProposalItem, deleteProposalItem as sbDeleteProposalItem,
 } from "./lib/supabaseClient";
 import { assembleEventFromSupabase } from "./lib/adapter";
@@ -383,39 +384,79 @@ function assigneeColor(name, team) {
   return palette[idx % palette.length];
 }
 
-function AddTaskRow({ onAdd }) {
+function AddTaskRow({ onAdd, teamMembers }) {
   const [label, setLabel] = useState("");
+  const [restricted, setRestricted] = useState(false);
+  const [appointed, setAppointed] = useState([]);
+
   const submit = () => {
     if (!label.trim()) return;
-    onAdd(clampText(label, LIMITS.shortText));
+    onAdd(clampText(label, LIMITS.shortText), {
+      visibility: restricted ? "restricted" : "team",
+      assigneePlannerIds: restricted ? appointed : [],
+    });
     setLabel("");
+    setRestricted(false);
+    setAppointed([]);
   };
+
+  const toggleAppointed = (id) => {
+    setAppointed((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
   return (
-    <div style={{ display: "flex", gap: 8, marginTop: 8, marginBottom: 4 }}>
-      <input
-        value={label}
-        onChange={(e) => setLabel(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && submit()}
-        placeholder="Add a task…"
-        style={{
-          flex: 1, fontFamily: FONT_BODY, fontSize: 13, padding: "7px 10px",
-          border: `1px dashed ${COLORS.line}`, borderRadius: 4, background: COLORS.paper, color: COLORS.ink, outline: "none",
-        }}
-      />
-      <button
-        onClick={submit}
-        style={{
-          display: "flex", alignItems: "center", justifyContent: "center", width: 30, borderRadius: 4,
-          border: "none", background: COLORS.brass, color: COLORS.ink, cursor: "pointer", flexShrink: 0,
-        }}
-      >
-        <Plus size={15} />
-      </button>
+    <div style={{ marginTop: 8, marginBottom: 4 }}>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && !restricted && submit()}
+          placeholder="Add a task…"
+          style={{
+            flex: 1, fontFamily: FONT_BODY, fontSize: 13, padding: "7px 10px",
+            border: `1px dashed ${COLORS.line}`, borderRadius: 4, background: COLORS.paper, color: COLORS.ink, outline: "none",
+          }}
+        />
+        <button
+          onClick={submit}
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "center", width: 30, borderRadius: 4,
+            border: "none", background: COLORS.brass, color: COLORS.ink, cursor: "pointer", flexShrink: 0,
+          }}
+        >
+          <Plus size={15} />
+        </button>
+      </div>
+      {teamMembers && teamMembers.length > 0 && (
+        <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: FONT_BODY, fontSize: 12, color: COLORS.inkSoft, cursor: "pointer" }}>
+            <input type="checkbox" checked={restricted} onChange={(e) => setRestricted(e.target.checked)} />
+            Private task — only admins and appointed team members can see this
+          </label>
+          {restricted && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, paddingLeft: 22 }}>
+              {teamMembers.map((m) => (
+                <label
+                  key={m.id}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 5, fontFamily: FONT_BODY, fontSize: 12,
+                    color: COLORS.inkSoft, cursor: "pointer", padding: "3px 8px", borderRadius: 999,
+                    border: `1px solid ${COLORS.line}`, background: appointed.includes(m.id) ? COLORS.brassPale : "transparent",
+                  }}
+                >
+                  <input type="checkbox" checked={appointed.includes(m.id)} onChange={() => toggleAppointed(m.id)} style={{ margin: 0 }} />
+                  {m.name}
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-function PhaseChecklist({ phases, editable, isAdmin, onToggleTask, team, onAssign, onAddTask, onDeleteTask }) {
+function PhaseChecklist({ phases, editable, isAdmin, onToggleTask, team, teamMembers, onAssign, onAddTask, onDeleteTask }) {
   return (
     <div>
       {phases.map((phase, pi) => (
@@ -487,6 +528,9 @@ function PhaseChecklist({ phases, editable, isAdmin, onToggleTask, team, onAssig
                 ) : (
                   <Circle size={17} color={COLORS.inkFaint} strokeWidth={1.5} />
                 )}
+                {task.visibility === "restricted" && (
+                  <Lock size={12} color={COLORS.inkFaint} title="Private — only admins and appointed team members can see this" />
+                )}
                 <span
                   style={{
                     fontFamily: FONT_BODY,
@@ -539,7 +583,9 @@ function PhaseChecklist({ phases, editable, isAdmin, onToggleTask, team, onAssig
               )}
             </div>
           ))}
-          {isAdmin && onAddTask && <AddTaskRow onAdd={(label) => onAddTask(phase.id, label)} />}
+          {isAdmin && onAddTask && (
+            <AddTaskRow onAdd={(label, options) => onAddTask(phase.id, label, options)} teamMembers={teamMembers} />
+          )}
         </div>
       ))}
     </div>
@@ -873,7 +919,7 @@ function ProposalView({ proposal, editable, isAdmin, onSubmitReview, onSend, onR
 
 /* ---------------- Approvals ---------------- */
 
-function ApprovalsList({ approvals, editable, isAdmin, onApprove, onRequest, onRelease }) {
+function ApprovalsList({ approvals, editable, isAdmin, onApprove, onDisapprove, onRequest, onRelease }) {
   const [label, setLabel] = useState("");
   const [desc, setDesc] = useState("");
 
@@ -911,6 +957,11 @@ function ApprovalsList({ approvals, editable, isAdmin, onApprove, onRequest, onR
             <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: COLORS.inkFaint, marginTop: 4 }}>
               Requested {formatTimestamp(a.requestedAt)}
             </div>
+            {!editable && a.status === "disapproved" && (
+              <div style={{ fontFamily: FONT_BODY, fontSize: 12, color: COLORS.clayDeep, marginTop: 6 }}>
+                You requested changes on {formatTimestamp(a.disapprovedAt)}. Your planner has been notified.
+              </div>
+            )}
           </div>
           {editable ? (
             a.status === "pending_review" ? (
@@ -928,11 +979,29 @@ function ApprovalsList({ approvals, editable, isAdmin, onApprove, onRequest, onR
               ) : (
                 <StatusTag status="Awaiting approval" />
               )
+            ) : a.status === "disapproved" ? (
+              isAdmin ? (
+                <button
+                  onClick={() => onRelease(a.id)}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 999,
+                    border: "none", background: COLORS.brass, color: COLORS.ink,
+                    fontFamily: FONT_BODY, fontWeight: 700, fontSize: 12, cursor: "pointer", whiteSpace: "nowrap",
+                  }}
+                >
+                  <Stamp size={12} /> Re-release to client
+                </button>
+              ) : (
+                <StatusTag status="Changes requested" />
+              )
             ) : (
               <StatusTag status={a.status === "approved" ? "Final stretch" : "In production"} />
             )
-          ) : (
-            <StampButton approved={a.status === "approved"} approvedAt={a.approvedAt} onApprove={() => onApprove(a.id)} />
+          ) : a.status === "disapproved" ? null : (
+            <div style={{ display: "flex", alignItems: "center", gap: 24 }}>
+              <StampButton approved={a.status === "approved"} approvedAt={a.approvedAt} onApprove={() => onApprove(a.id)} />
+              {a.status === "pending" && <DisapproveStampButton onDisapprove={() => onDisapprove(a.id)} />}
+            </div>
           )}
         </div>
       ))}
@@ -1000,6 +1069,109 @@ function ApprovalsList({ approvals, editable, isAdmin, onApprove, onRequest, onR
         </div>
       )}
     </SectionCard>
+  );
+}
+
+/* ---------------- Task requests (client-proposed, admin-resolved) ---------------- */
+
+function TaskRequestsPanel({ requests, phases, isAdmin, onApprove, onDismiss }) {
+  const pending = (requests || []).filter((r) => r.status === "pending");
+  if (pending.length === 0) return null;
+
+  return (
+    <div style={{ marginBottom: 22, padding: "14px 16px", background: COLORS.paperDeep, borderRadius: 6 }}>
+      <Eyebrow>{pending.length === 1 ? "1 task requested by client" : `${pending.length} tasks requested by client`}</Eyebrow>
+      <div style={{ marginTop: 8 }}>
+        {pending.map((r) => (
+          <TaskRequestRow key={r.id} request={r} phases={phases} isAdmin={isAdmin} onApprove={onApprove} onDismiss={onDismiss} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TaskRequestRow({ request, phases, isAdmin, onApprove, onDismiss }) {
+  const [resolving, setResolving] = useState(false);
+  const [phaseId, setPhaseId] = useState(phases[0]?.id || "");
+  const [label, setLabel] = useState(request.label);
+
+  const smallInputStyle = {
+    fontFamily: FONT_BODY, fontSize: 13, padding: "7px 10px",
+    border: `1px solid ${COLORS.line}`, borderRadius: 4, background: COLORS.card, color: COLORS.ink, outline: "none",
+  };
+
+  return (
+    <div style={{ padding: "10px 0", borderBottom: `1px solid ${COLORS.line}` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+        <div style={{ flex: 1, minWidth: 200 }}>
+          <div style={{ fontFamily: FONT_BODY, fontSize: 14, fontWeight: 600, color: COLORS.ink }}>{request.label}</div>
+          {request.description && (
+            <div style={{ fontFamily: FONT_BODY, fontSize: 13, color: COLORS.inkSoft, marginTop: 2 }}>{request.description}</div>
+          )}
+          <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: COLORS.inkFaint, marginTop: 4 }}>
+            Requested {formatTimestamp(request.requestedAt)}
+          </div>
+        </div>
+        {isAdmin ? (
+          !resolving && (
+            <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+              <button
+                onClick={() => setResolving(true)}
+                style={{
+                  padding: "6px 12px", borderRadius: 999, border: "none", background: COLORS.brass, color: COLORS.ink,
+                  fontFamily: FONT_BODY, fontWeight: 700, fontSize: 12, cursor: "pointer", whiteSpace: "nowrap",
+                }}
+              >
+                Add to checklist
+              </button>
+              <button
+                onClick={() => onDismiss(request.id)}
+                style={{
+                  padding: "6px 12px", borderRadius: 999, border: `1px solid ${COLORS.line}`, background: "transparent",
+                  color: COLORS.inkSoft, fontFamily: FONT_BODY, fontWeight: 600, fontSize: 12, cursor: "pointer", whiteSpace: "nowrap",
+                }}
+              >
+                Dismiss
+              </button>
+            </div>
+          )
+        ) : (
+          <StatusTag status="Awaiting admin" />
+        )}
+      </div>
+      {isAdmin && resolving && (
+        <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <select value={phaseId} onChange={(e) => setPhaseId(e.target.value)} style={smallInputStyle}>
+            {phases.map((p) => (
+              <option key={p.id} value={p.id}>{p.title}</option>
+            ))}
+          </select>
+          <input value={label} onChange={(e) => setLabel(e.target.value)} style={{ ...smallInputStyle, flex: 1, minWidth: 160 }} />
+          <button
+            onClick={() => {
+              if (!phaseId || !label.trim()) return;
+              onApprove(request.id, phaseId, clampText(label, LIMITS.shortText));
+              setResolving(false);
+            }}
+            style={{
+              padding: "7px 12px", borderRadius: 4, border: "none", background: COLORS.brass, color: COLORS.ink,
+              fontFamily: FONT_BODY, fontWeight: 700, fontSize: 12, cursor: "pointer",
+            }}
+          >
+            Confirm
+          </button>
+          <button
+            onClick={() => setResolving(false)}
+            style={{
+              padding: "7px 12px", borderRadius: 4, border: `1px solid ${COLORS.line}`, background: "transparent",
+              color: COLORS.inkSoft, fontFamily: FONT_BODY, fontWeight: 600, fontSize: 12, cursor: "pointer",
+            }}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1078,7 +1250,7 @@ function vendorStatusTag(status) {
   return map[status] || map.inquiry;
 }
 
-function VendorsView({ vendors, onAddVendor, onCycleStatus, onUpdatePhone }) {
+function VendorsView({ vendors, onAddVendor, onCycleStatus, onUpdatePhone, readOnly = false }) {
   const [name, setName] = useState("");
   const [category, setCategory] = useState("");
   const [contact, setContact] = useState("");
@@ -1152,78 +1324,97 @@ function VendorsView({ vendors, onAddVendor, onCycleStatus, onUpdatePhone }) {
                   <Mail size={11} /> {v.contact}
                 </div>
               )}
-              <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4 }}>
-                <Phone size={11} color={COLORS.inkFaint} />
-                <input
-                  defaultValue={v.phone || ""}
-                  placeholder="Add phone number"
-                  onBlur={(e) => {
-                    const next = clampText(e.target.value, LIMITS.shortText);
-                    if (next !== (v.phone || "")) onUpdatePhone(v.id, next);
-                  }}
-                  style={{
-                    fontFamily: FONT_MONO, fontSize: 11, color: COLORS.inkFaint, background: "none",
-                    border: "none", outline: "none", padding: 0, width: 130,
-                  }}
-                />
-              </div>
+              {(v.phone || !readOnly) && (
+                <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4 }}>
+                  <Phone size={11} color={COLORS.inkFaint} />
+                  {readOnly ? (
+                    <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: COLORS.inkFaint }}>{v.phone}</span>
+                  ) : (
+                    <input
+                      defaultValue={v.phone || ""}
+                      placeholder="Add phone number"
+                      onBlur={(e) => {
+                        const next = clampText(e.target.value, LIMITS.shortText);
+                        if (next !== (v.phone || "")) onUpdatePhone(v.id, next);
+                      }}
+                      style={{
+                        fontFamily: FONT_MONO, fontSize: 11, color: COLORS.inkFaint, background: "none",
+                        border: "none", outline: "none", padding: 0, width: 130,
+                      }}
+                    />
+                  )}
+                </div>
+              )}
             </div>
             <div style={{ fontFamily: FONT_MONO, fontSize: 13, color: COLORS.inkSoft, minWidth: 100, textAlign: "right" }}>
               {currency(v.cost)}
             </div>
-            <button
-              onClick={() => onCycleStatus(v.id)}
-              style={{
-                fontFamily: FONT_BODY,
-                fontSize: 11,
-                fontWeight: 600,
-                padding: "4px 10px",
-                borderRadius: 999,
-                background: tag.bg,
-                color: tag.fg,
-                border: "none",
-                cursor: "pointer",
-                whiteSpace: "nowrap",
-              }}
-              title="Click to change status"
-            >
-              {tag.label}
-            </button>
+            {readOnly ? (
+              <span
+                style={{
+                  fontFamily: FONT_BODY, fontSize: 11, fontWeight: 600, padding: "4px 10px",
+                  borderRadius: 999, background: tag.bg, color: tag.fg, whiteSpace: "nowrap",
+                }}
+              >
+                {tag.label}
+              </span>
+            ) : (
+              <button
+                onClick={() => onCycleStatus(v.id)}
+                style={{
+                  fontFamily: FONT_BODY,
+                  fontSize: 11,
+                  fontWeight: 600,
+                  padding: "4px 10px",
+                  borderRadius: 999,
+                  background: tag.bg,
+                  color: tag.fg,
+                  border: "none",
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                }}
+                title="Click to change status"
+              >
+                {tag.label}
+              </button>
+            )}
           </div>
         );
       })}
 
-      <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px dashed ${COLORS.line}` }}>
-        <Eyebrow>Add a vendor</Eyebrow>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10 }}>
-          <input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="Vendor name" />
-          <input style={inputStyle} value={category} onChange={(e) => setCategory(e.target.value)} placeholder="Category (e.g. Catering)" />
-          <input style={inputStyle} value={contact} onChange={(e) => setContact(e.target.value)} placeholder="Contact email" />
-          <input style={inputStyle} value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="Phone number" />
-          <input style={inputStyle} value={cost} onChange={(e) => setCost(e.target.value)} placeholder="Cost (₦)" type="number" />
+      {!readOnly && (
+        <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px dashed ${COLORS.line}` }}>
+          <Eyebrow>Add a vendor</Eyebrow>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10 }}>
+            <input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="Vendor name" />
+            <input style={inputStyle} value={category} onChange={(e) => setCategory(e.target.value)} placeholder="Category (e.g. Catering)" />
+            <input style={inputStyle} value={contact} onChange={(e) => setContact(e.target.value)} placeholder="Contact email" />
+            <input style={inputStyle} value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="Phone number" />
+            <input style={inputStyle} value={cost} onChange={(e) => setCost(e.target.value)} placeholder="Cost (₦)" type="number" />
+          </div>
+          {error && <div style={{ fontFamily: FONT_BODY, fontSize: 12, color: COLORS.clayDeep, marginTop: 8 }}>{error}</div>}
+          <button
+            onClick={submit}
+            style={{
+              marginTop: 10,
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "8px 14px",
+              borderRadius: 4,
+              border: "none",
+              background: COLORS.brass,
+              color: COLORS.card,
+              fontFamily: FONT_BODY,
+              fontWeight: 600,
+              fontSize: 13,
+              cursor: "pointer",
+            }}
+          >
+            <Plus size={14} /> Add vendor
+          </button>
         </div>
-        {error && <div style={{ fontFamily: FONT_BODY, fontSize: 12, color: COLORS.clayDeep, marginTop: 8 }}>{error}</div>}
-        <button
-          onClick={submit}
-          style={{
-            marginTop: 10,
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            padding: "8px 14px",
-            borderRadius: 4,
-            border: "none",
-            background: COLORS.brass,
-            color: COLORS.card,
-            fontFamily: FONT_BODY,
-            fontWeight: 600,
-            fontSize: 13,
-            cursor: "pointer",
-          }}
-        >
-          <Plus size={14} /> Add vendor
-        </button>
-      </div>
+      )}
     </SectionCard>
   );
 }
@@ -1749,7 +1940,7 @@ function NewProjectForm({ onCreate, onBack }) {
 
 /* ---------------- Admin approval queue ---------------- */
 
-function TeamManagement({ onBack }) {
+function TeamManagement({ onBack, currentPlannerId }) {
   const [members, setMembers] = useState(null);
   const [error, setError] = useState("");
   const [email, setEmail] = useState("");
@@ -1790,6 +1981,16 @@ function TeamManagement({ onBack }) {
     }
   };
 
+  const remove = async (plannerId) => {
+    setError("");
+    try {
+      await removePlanner(plannerId);
+      setMembers((prev) => prev.filter((m) => m.id !== plannerId));
+    } catch (err) {
+      setError(err?.message || "Couldn't remove that team member.");
+    }
+  };
+
   const fieldStyle = {
     fontFamily: FONT_BODY, fontSize: 13, padding: "9px 12px",
     border: `1px solid ${COLORS.line}`, borderRadius: 4, background: COLORS.paper, color: COLORS.ink, outline: "none",
@@ -1825,18 +2026,21 @@ function TeamManagement({ onBack }) {
             }}
           >
             <span style={{ fontFamily: FONT_BODY, fontSize: 14, color: COLORS.ink }}>{m.email}</span>
-            <button
-              onClick={() => changeRole(m.id, m.role === "admin" ? "team" : "admin")}
-              style={{
-                fontFamily: FONT_BODY, fontSize: 11, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase",
-                padding: "4px 10px", borderRadius: 999, border: "none", cursor: "pointer",
-                background: m.role === "admin" ? COLORS.brassPale : COLORS.line,
-                color: m.role === "admin" ? COLORS.brassDeep : COLORS.inkSoft,
-              }}
-              title="Click to toggle role"
-            >
-              {m.role === "admin" ? "Admin" : "Team member"}
-            </button>
+            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <button
+                onClick={() => changeRole(m.id, m.role === "admin" ? "team" : "admin")}
+                style={{
+                  fontFamily: FONT_BODY, fontSize: 11, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase",
+                  padding: "4px 10px", borderRadius: 999, border: "none", cursor: "pointer",
+                  background: m.role === "admin" ? COLORS.brassPale : COLORS.line,
+                  color: m.role === "admin" ? COLORS.brassDeep : COLORS.inkSoft,
+                }}
+                title="Click to toggle role"
+              >
+                {m.role === "admin" ? "Admin" : "Team member"}
+              </button>
+              {m.id !== currentPlannerId && <RemoveMemberControl onRemove={() => remove(m.id)} />}
+            </div>
           </div>
         ))}
       </SectionCard>
@@ -2149,7 +2353,59 @@ function DeleteProjectControl({ onDelete }) {
   );
 }
 
-function StudioEventDetail({ event, isAdmin, onBack, onToggleTask, onAssignTask, onAddTask, onDeleteTask, onSubmitProposalReview, onSendProposal, onRejectProposal, onResetProposal, onOpenDocument, onAddProposalItem, onUpdateProposalItem, onDeleteProposalItem, onRequestApproval, onReleaseApproval, onAddVendor, onCycleVendorStatus, onUpdateVendorPhone, onSendMessage, onPreviewClient, onDeleteProject }) {
+function RemoveMemberControl({ onRemove }) {
+  const [confirming, setConfirming] = useState(false);
+  const [removing, setRemoving] = useState(false);
+
+  if (confirming) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontFamily: FONT_BODY, fontSize: 12, color: COLORS.clayDeep, fontWeight: 600 }}>
+          Remove from Studio?
+        </span>
+        <button
+          onClick={async () => {
+            setRemoving(true);
+            await onRemove();
+            setRemoving(false);
+          }}
+          disabled={removing}
+          style={{
+            padding: "6px 12px", borderRadius: 4, border: "none", background: COLORS.clay, color: COLORS.card,
+            fontFamily: FONT_BODY, fontWeight: 700, fontSize: 12, cursor: removing ? "default" : "pointer",
+          }}
+        >
+          {removing ? "Removing…" : "Yes, remove"}
+        </button>
+        <button
+          onClick={() => setConfirming(false)}
+          disabled={removing}
+          style={{
+            padding: "6px 12px", borderRadius: 4, border: `1px solid ${COLORS.line}`, background: "transparent",
+            color: COLORS.inkSoft, fontFamily: FONT_BODY, fontWeight: 600, fontSize: 12, cursor: removing ? "default" : "pointer",
+          }}
+        >
+          Cancel
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <button
+      onClick={() => setConfirming(true)}
+      title="Remove from Studio"
+      style={{
+        display: "flex", alignItems: "center", background: "none", border: "none",
+        color: COLORS.inkFaint, cursor: "pointer", padding: 4,
+      }}
+    >
+      <X size={15} />
+    </button>
+  );
+}
+
+function StudioEventDetail({ event, isAdmin, onBack, onToggleTask, onAssignTask, onAddTask, onDeleteTask, onSubmitProposalReview, onSendProposal, onRejectProposal, onResetProposal, onOpenDocument, onAddProposalItem, onUpdateProposalItem, onDeleteProposalItem, onRequestApproval, onReleaseApproval, onAddVendor, onCycleVendorStatus, onUpdateVendorPhone, onSendMessage, onPreviewClient, onDeleteProject, onApproveTaskRequest, onDismissTaskRequest }) {
   const [tab, setTab] = useState("overview");
   const pct = progressOf(event);
 
@@ -2230,6 +2486,15 @@ function StudioEventDetail({ event, isAdmin, onBack, onToggleTask, onAssignTask,
               <StatusTag status={event.status} />
             </div>
           </div>
+          {(event.taskRequests || []).some((r) => r.status === "pending") && (
+            <TaskRequestsPanel
+              requests={event.taskRequests}
+              phases={event.phases}
+              isAdmin={isAdmin}
+              onApprove={onApproveTaskRequest}
+              onDismiss={onDismissTaskRequest}
+            />
+          )}
           <SectionTitle>Timeline & tasks</SectionTitle>
           <PhaseChecklist
             phases={event.phases}
@@ -2237,6 +2502,7 @@ function StudioEventDetail({ event, isAdmin, onBack, onToggleTask, onAssignTask,
             isAdmin={isAdmin}
             onToggleTask={onToggleTask}
             team={event.team}
+            teamMembers={event.teamMembers}
             onAssign={onAssignTask}
             onAddTask={onAddTask}
             onDeleteTask={onDeleteTask}
@@ -2281,7 +2547,7 @@ function StudioEventDetail({ event, isAdmin, onBack, onToggleTask, onAssignTask,
 
 /* ---------------- Client Portal ---------------- */
 
-function ClientPortal({ event, onToggleTask, onApproveProposal, onDisapproveProposal, onApproveMilestone, onSendMessage }) {
+function ClientPortal({ event, onToggleTask, onApproveProposal, onDisapproveProposal, onApproveMilestone, onDisapproveMilestone, onSendMessage, onRequestTask, previewMode = false }) {
   const pct = progressOf(event);
   // Anything still awaiting internal admin review should look identical to
   // "draft" from the client's point of view — they should never see, or need
@@ -2291,8 +2557,25 @@ function ClientPortal({ event, onToggleTask, onApproveProposal, onDisapproveProp
     : event.proposal;
   const clientApprovals = (event.approvals || []).filter((a) => a.status !== "pending_review");
 
+  // In preview mode these props arrive as undefined (see the root App
+  // component) — the invited client is the only session RLS actually lets
+  // approve/disapprove/message/request here, so this is belt-and-suspenders
+  // against a crash, not the real security boundary.
+  const noop = () => {};
+
   return (
     <div style={{ maxWidth: 760, margin: "0 auto", padding: "0 20px 60px" }}>
+      {previewMode && (
+        <div
+          style={{
+            marginTop: 16, padding: "10px 14px", borderRadius: 6, background: COLORS.paperDeep,
+            border: `1px solid ${COLORS.line}`, display: "flex", alignItems: "center", gap: 8,
+            fontFamily: FONT_BODY, fontSize: 12, color: COLORS.inkSoft,
+          }}
+        >
+          <Eye size={13} /> Previewing as the client — only the client can actually approve, disapprove, message, or request a task here.
+        </div>
+      )}
       <div style={{ padding: "40px 0 28px", textAlign: "center" }}>
         <Eyebrow>{event.type} · {event.date}</Eyebrow>
         <h1 style={{ fontFamily: FONT_DISPLAY, fontStyle: "italic", fontWeight: 500, fontSize: "clamp(30px, 6vw, 44px)", color: COLORS.ink, margin: "8px 0 10px" }}>
@@ -2313,17 +2596,95 @@ function ClientPortal({ event, onToggleTask, onApproveProposal, onDisapproveProp
         <SectionCard>
           <SectionTitle>Planning timeline</SectionTitle>
           <PhaseChecklist phases={event.phases} editable={false} />
+          {!previewMode && onRequestTask && <TaskRequestForm requests={event.taskRequests} onRequest={onRequestTask} />}
         </SectionCard>
 
-        <ProposalView proposal={clientProposal} editable={false} onApprove={onApproveProposal} onDisapprove={onDisapproveProposal} />
+        <ProposalView proposal={clientProposal} editable={false} onApprove={onApproveProposal || noop} onDisapprove={onDisapproveProposal || noop} />
 
-        <ApprovalsList approvals={clientApprovals} editable={false} onApprove={onApproveMilestone} />
+        <ApprovalsList approvals={clientApprovals} editable={false} onApprove={onApproveMilestone || noop} onDisapprove={onDisapproveMilestone || noop} />
+
+        <VendorsView vendors={event.vendors || []} readOnly />
+
+        <BudgetView budget={event.budget} vendors={event.vendors} />
 
         <MessageThread
           messages={event.messages || []}
-          onSend={onSendMessage}
+          onSend={onSendMessage || noop}
           senderOptions={[{ value: "client", label: event.clientName, authorType: "client" }]}
         />
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Client task requests ---------------- */
+
+function TaskRequestForm({ requests, onRequest }) {
+  const [label, setLabel] = useState("");
+  const [description, setDescription] = useState("");
+
+  const submit = () => {
+    if (!label.trim()) return;
+    onRequest(clampText(label, LIMITS.shortText), clampText(description, LIMITS.longText));
+    setLabel("");
+    setDescription("");
+  };
+
+  const statusLabel = { pending: "Awaiting review", approved: "Added to checklist", dismissed: "Not added" };
+
+  return (
+    <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px dashed ${COLORS.line}` }}>
+      <Eyebrow>Request a task</Eyebrow>
+      <div style={{ fontFamily: FONT_BODY, fontSize: 12, color: COLORS.inkFaint, marginTop: 4, marginBottom: 10 }}>
+        Something missing from the plan? Ask your planner to add it.
+      </div>
+
+      {(requests || []).length > 0 && (
+        <div style={{ marginBottom: 14 }}>
+          {requests.map((r) => (
+            <div
+              key={r.id}
+              style={{
+                display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10,
+                padding: "8px 0", borderBottom: `1px solid ${COLORS.line}`, flexWrap: "wrap",
+              }}
+            >
+              <span style={{ fontFamily: FONT_BODY, fontSize: 13, color: COLORS.ink }}>{r.label}</span>
+              <StatusTag status={statusLabel[r.status] || r.status} />
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <input
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          placeholder="What would you like added?"
+          style={{
+            fontFamily: FONT_BODY, fontSize: 13, padding: "9px 12px",
+            border: `1px solid ${COLORS.line}`, borderRadius: 4, background: COLORS.paper, color: COLORS.ink, outline: "none",
+          }}
+        />
+        <input
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          placeholder="Any detail that would help (optional)"
+          style={{
+            fontFamily: FONT_BODY, fontSize: 13, padding: "9px 12px",
+            border: `1px solid ${COLORS.line}`, borderRadius: 4, background: COLORS.paper, color: COLORS.ink, outline: "none",
+          }}
+        />
+        <button
+          onClick={submit}
+          style={{
+            alignSelf: "flex-start", display: "flex", alignItems: "center", gap: 6, padding: "8px 14px",
+            borderRadius: 4, border: "none", background: COLORS.brass, color: COLORS.ink,
+            fontFamily: FONT_BODY, fontWeight: 600, fontSize: 13, cursor: "pointer",
+          }}
+        >
+          <Plus size={14} /> Request task
+        </button>
       </div>
     </div>
   );
@@ -2758,7 +3119,7 @@ function ClientInviteLanding({ onBack }) {
 
 /* ---------------- Top Nav ---------------- */
 
-function TopNav({ role, inEvent, onBackToDashboard, onSignOut, isAdmin, pendingCount, onOpenQueue, onOpenTeam }) {
+function TopNav({ role, inEvent, onBackToDashboard, onSignOut, isAdmin, isPreview, pendingCount, onOpenQueue, onOpenTeam }) {
   return (
     <div
       style={{
@@ -2780,7 +3141,7 @@ function TopNav({ role, inEvent, onBackToDashboard, onSignOut, isAdmin, pendingC
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         {role === "client" && (
           <span style={{ fontFamily: FONT_BODY, fontSize: 12, color: COLORS.inkFaint, display: "flex", alignItems: "center", gap: 6 }}>
-            <Mail size={13} /> Client view
+            {isPreview ? <><Eye size={13} /> Previewing as client</> : <><Mail size={13} /> Client view</>}
           </span>
         )}
         {inEvent && (
@@ -2844,6 +3205,39 @@ function TopNav({ role, inEvent, onBackToDashboard, onSignOut, isAdmin, pendingC
   );
 }
 
+/* ---------------- Live notifications ---------------- */
+
+function NotificationToasts({ notifications, onDismiss }) {
+  if (notifications.length === 0) return null;
+  return (
+    <div
+      style={{
+        position: "fixed", bottom: 20, right: 20, zIndex: 1000,
+        display: "flex", flexDirection: "column", gap: 8, maxWidth: 320,
+      }}
+    >
+      {notifications.map((n) => (
+        <div
+          key={n.id}
+          style={{
+            display: "flex", alignItems: "flex-start", gap: 10, padding: "12px 14px",
+            background: COLORS.ink, color: COLORS.paper, borderRadius: 6,
+            boxShadow: "0 4px 16px rgba(0,0,0,0.25)", fontFamily: FONT_BODY, fontSize: 13,
+          }}
+        >
+          <span style={{ flex: 1, lineHeight: 1.4 }}>{n.text}</span>
+          <button
+            onClick={() => onDismiss(n.id)}
+            style={{ background: "none", border: "none", color: COLORS.paperDeep, cursor: "pointer", padding: 0, flexShrink: 0 }}
+          >
+            <X size={14} />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /* ---------------- Root App ---------------- */
 
 export default function BitAffairs() {
@@ -2858,6 +3252,17 @@ export default function BitAffairs() {
   const [creatingProject, setCreatingProject] = useState(false);
   const [viewingQueue, setViewingQueue] = useState(false);
   const [viewingTeam, setViewingTeam] = useState(false);
+  const [notifications, setNotifications] = useState([]);
+
+  // Refs so the long-lived realtime subscription below always reads the
+  // *current* open event / event list without needing to tear down and
+  // resubscribe every time they change.
+  const openEventIdRef = useRef(openEventId);
+  useEffect(() => { openEventIdRef.current = openEventId; }, [openEventId]);
+  const clientEventIdRef = useRef(clientEventId);
+  useEffect(() => { clientEventIdRef.current = clientEventId; }, [clientEventId]);
+  const eventsRef = useRef(events);
+  useEffect(() => { eventsRef.current = events; }, [events]);
 
   // Pulls the full event list (already RLS-scoped to the caller — a planner
   // gets their org's events, a client gets only their one event) and
@@ -2937,6 +3342,65 @@ export default function BitAffairs() {
     });
     return () => sub.subscription.unsubscribe();
   }, []);
+
+  // Live updates + notifications — see 0015_realtime.sql. One subscription
+  // covers messages, proposals, approvals, and task_requests; Realtime's
+  // own RLS enforcement means each connected user only ever receives rows
+  // their normal SELECT policies already allow, so nothing extra needs
+  // filtering client-side. Whichever event is currently open gets a silent
+  // re-fetch (no page reload); messages/proposals/approvals additionally
+  // surface as a toast for whoever's connected, studio or client.
+  useEffect(() => {
+    if (!session || !supabaseConfigured) return;
+
+    const unsubscribe = subscribeToActivity((table, payload) => {
+      const row = payload.new && Object.keys(payload.new).length ? payload.new : payload.old;
+      const affectedEventId = row?.event_id;
+      if (!affectedEventId) return;
+
+      if (affectedEventId === openEventIdRef.current || affectedEventId === clientEventIdRef.current) {
+        refreshEvent(affectedEventId).catch((err) => console.error("Failed to live-refresh event", err));
+      }
+
+      // Task requests get the live re-fetch above (keeps the admin queue
+      // current) but no toast — the ask was notifications for messages,
+      // proposals, and approvals specifically.
+      if (table === "task_requests") return;
+
+      const eventName = eventsRef.current.find((e) => e.id === affectedEventId)?.name || "an event";
+      let text = null;
+      if (table === "messages" && payload.eventType === "INSERT") {
+        text = `${row.author_name || "Someone"} sent a message on ${eventName}`;
+      } else if (table === "proposals" && payload.eventType === "UPDATE") {
+        const byStatus = {
+          sent: `${eventName}: proposal sent to the client`,
+          approved: `${eventName}: client approved the proposal`,
+          disapproved: `${eventName}: client requested changes to the proposal`,
+          pending_review: `${eventName}: proposal submitted for review`,
+        };
+        text = byStatus[row.status] || null;
+      } else if (table === "approvals") {
+        if (payload.eventType === "INSERT" && row.status === "pending") {
+          text = `${eventName}: a new approval was sent to the client`;
+        } else if (payload.eventType === "UPDATE") {
+          const byStatus = {
+            pending: `${eventName}: an approval was released to the client`,
+            approved: `${eventName}: client approved a milestone`,
+            disapproved: `${eventName}: client requested changes on a milestone`,
+          };
+          text = byStatus[row.status] || null;
+        }
+      }
+
+      if (text) {
+        const id = `${Date.now()}-${Math.random()}`;
+        setNotifications((prev) => [...prev.slice(-19), { id, text }]);
+        setTimeout(() => setNotifications((prev) => prev.filter((n) => n.id !== id)), 7000);
+      }
+    });
+
+    return unsubscribe;
+  }, [session, supabaseConfigured]);
 
   const handleToggleTask = async (eventId, phaseId, taskId) => {
     const task = events.find((e) => e.id === eventId)?.phases.find((p) => p.id === phaseId)?.tasks.find((t) => t.id === taskId);
@@ -3023,6 +3487,15 @@ export default function BitAffairs() {
     }
   };
 
+  const handleDisapproveMilestone = async (eventId, approvalId) => {
+    try {
+      await sbClientDisapproveMilestone(approvalId); // trigger rejects this server-side unless caller is the invited client
+      await refreshEvent(eventId);
+    } catch (err) {
+      console.error("Failed to disapprove milestone", err);
+    }
+  };
+
   const handleAssignTask = async (eventId, phaseId, taskId) => {
     const event = events.find((e) => e.id === eventId);
     if (!event) return;
@@ -3039,12 +3512,41 @@ export default function BitAffairs() {
     }
   };
 
-  const handleAddTask = async (eventId, phaseId, label) => {
+  const handleAddTask = async (eventId, phaseId, label, options) => {
     try {
-      await sbAddTask(phaseId, label);
+      await sbAddTask(phaseId, label, options);
       await refreshEvent(eventId);
     } catch (err) {
       console.error("Failed to add task", err);
+    }
+  };
+
+  const handleRequestTask = async (eventId, label, description) => {
+    try {
+      // The DB trigger independently keeps this at 'pending' until an
+      // admin resolves it — nothing client-side to gate here.
+      await sbRequestTask(eventId, label, description);
+      await refreshEvent(eventId);
+    } catch (err) {
+      console.error("Failed to request task", err);
+    }
+  };
+
+  const handleApproveTaskRequest = async (eventId, requestId, phaseId, label) => {
+    try {
+      await sbApproveTaskRequest(requestId, phaseId, label); // trigger rejects this server-side unless caller is admin
+      await refreshEvent(eventId);
+    } catch (err) {
+      console.error("Failed to approve task request", err);
+    }
+  };
+
+  const handleDismissTaskRequest = async (eventId, requestId) => {
+    try {
+      await sbDismissTaskRequest(requestId); // trigger rejects this server-side unless caller is admin
+      await refreshEvent(eventId);
+    } catch (err) {
+      console.error("Failed to dismiss task request", err);
     }
   };
 
@@ -3183,7 +3685,7 @@ export default function BitAffairs() {
                 await signInPlanner(email, password);
                 const profile = await getCurrentPlanner();
                 if (!profile) {
-                  throw new Error("Signed in, but no planner profile exists for this account yet.");
+                  throw new Error("Signed in, but this account doesn't have Studio access — it may not have been added yet, or was removed.");
                 }
                 setSession({
                   type: "planner",
@@ -3218,6 +3720,13 @@ export default function BitAffairs() {
   const openEvent = events.find((e) => e.id === openEventId);
   const clientEvent = events.find((e) => e.id === clientEventId) || events[0];
   const isAdmin = session?.type === "planner" && session.orgRole === "admin";
+  // Admin clicked "Preview client portal" — same screen, but this is not
+  // the actual invited client, so it should be look-only. The real client's
+  // own session (session.type === "client") is the only one that can
+  // actually approve, disapprove, message, or request a task here — RLS
+  // enforces that server-side regardless, this just keeps the preview UI
+  // from showing controls that would silently do nothing if clicked.
+  const isPreview = role === "client" && session?.type === "planner";
   const pendingCount =
     events.filter((ev) => ev.proposal.status === "pending_review").length +
     events.reduce((sum, ev) => sum + (ev.approvals || []).filter((a) => a.status === "pending_review").length, 0);
@@ -3261,6 +3770,7 @@ export default function BitAffairs() {
           setRole("studio");
         }}
         isAdmin={isAdmin}
+        isPreview={isPreview}
         pendingCount={pendingCount}
         onOpenQueue={() => {
           setOpenEventId(null);
@@ -3276,7 +3786,7 @@ export default function BitAffairs() {
 
       {!loaded ? null : role === "studio" ? (
         viewingTeam ? (
-          <TeamManagement onBack={() => setViewingTeam(false)} />
+          <TeamManagement onBack={() => setViewingTeam(false)} currentPlannerId={session?.plannerId} />
         ) : viewingQueue ? (
           <AdminQueue
             events={events}
@@ -3295,7 +3805,7 @@ export default function BitAffairs() {
             onBack={() => setOpenEventId(null)}
             onToggleTask={(phaseId, taskId) => handleToggleTask(openEvent.id, phaseId, taskId)}
             onAssignTask={(phaseId, taskId) => handleAssignTask(openEvent.id, phaseId, taskId)}
-            onAddTask={(phaseId, label) => handleAddTask(openEvent.id, phaseId, label)}
+            onAddTask={(phaseId, label, options) => handleAddTask(openEvent.id, phaseId, label, options)}
             onDeleteTask={(phaseId, taskId) => handleDeleteTask(openEvent.id, phaseId, taskId)}
             onSubmitProposalReview={() => handleSubmitProposalForReview(openEvent.id)}
             onSendProposal={() => handleSendProposal(openEvent.id)}
@@ -3316,6 +3826,8 @@ export default function BitAffairs() {
               setRole("client");
             }}
             onDeleteProject={() => handleDeleteProject(openEvent.id)}
+            onApproveTaskRequest={(requestId, phaseId, label) => handleApproveTaskRequest(openEvent.id, requestId, phaseId, label)}
+            onDismissTaskRequest={(requestId) => handleDismissTaskRequest(openEvent.id, requestId)}
           />
         ) : creatingProject ? (
           <NewProjectForm onCreate={handleCreateProject} onBack={() => setCreatingProject(false)} />
@@ -3325,12 +3837,20 @@ export default function BitAffairs() {
       ) : (
         <ClientPortal
           event={clientEvent}
-          onApproveProposal={() => handleApproveProposal(clientEvent.id)}
-          onDisapproveProposal={() => handleDisapproveProposal(clientEvent.id)}
-          onApproveMilestone={(approvalId) => handleApproveMilestone(clientEvent.id, approvalId)}
-          onSendMessage={(message) => handleSendMessage(clientEvent.id, message)}
+          previewMode={isPreview}
+          onApproveProposal={isPreview ? undefined : () => handleApproveProposal(clientEvent.id)}
+          onDisapproveProposal={isPreview ? undefined : () => handleDisapproveProposal(clientEvent.id)}
+          onApproveMilestone={isPreview ? undefined : (approvalId) => handleApproveMilestone(clientEvent.id, approvalId)}
+          onDisapproveMilestone={isPreview ? undefined : (approvalId) => handleDisapproveMilestone(clientEvent.id, approvalId)}
+          onSendMessage={isPreview ? undefined : (message) => handleSendMessage(clientEvent.id, message)}
+          onRequestTask={isPreview ? undefined : (label, description) => handleRequestTask(clientEvent.id, label, description)}
         />
       )}
+
+      <NotificationToasts
+        notifications={notifications}
+        onDismiss={(id) => setNotifications((prev) => prev.filter((n) => n.id !== id))}
+      />
     </div>
   );
 }

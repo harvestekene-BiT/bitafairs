@@ -203,15 +203,14 @@ create policy "clients read released approvals only" on approvals for select
 
 create policy "planners manage vendors" on vendors for all
   using (is_org_planner(event_id)) with check (is_org_planner(event_id));
--- No client policy on vendors at all — clients get zero rows, by default,
--- not by convention.
+-- Originally no client policy existed here at all (clients got zero rows).
+-- 0009_client_vendors_budget.sql adds a client read-only policy on this
+-- table — see that migration for the read grant.
 
 create policy "planners manage budget" on budget_items for all
   using (is_org_planner(event_id)) with check (is_org_planner(event_id));
--- Deliberately no client policy on budget_items — the app never shows
--- planned-vs-actual internal budget figures to clients, only the proposal
--- total. Matching that in RLS means a client can never get these rows back
--- even if a future UI bug tried to query them.
+-- Originally no client policy existed here at all. 0009_client_vendors_budget.sql
+-- adds a client read-only policy on this table — see that migration.
 
 create policy "planners manage messages" on messages for all
   using (is_org_planner(event_id)) with check (is_org_planner(event_id));

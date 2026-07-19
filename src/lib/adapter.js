@@ -5,10 +5,23 @@
 // only the code that loads and saves data did.
 
 export function assembleEventFromSupabase(eventRow, detail) {
+  const assigneesByTask = {};
+  for (const ta of detail.taskAssignees || []) {
+    if (!assigneesByTask[ta.task_id]) assigneesByTask[ta.task_id] = [];
+    assigneesByTask[ta.task_id].push(ta.planner_id);
+  }
+
   const tasksByPhase = {};
   for (const t of detail.tasks) {
     if (!tasksByPhase[t.phase_id]) tasksByPhase[t.phase_id] = [];
-    tasksByPhase[t.phase_id].push({ id: t.id, label: t.label, done: t.done, assignee: t.assignee || null });
+    tasksByPhase[t.phase_id].push({
+      id: t.id,
+      label: t.label,
+      done: t.done,
+      assignee: t.assignee || null,
+      visibility: t.visibility || "team",
+      appointedPlannerIds: assigneesByTask[t.id] || [],
+    });
   }
 
   const phases = [...detail.phases]
@@ -19,6 +32,15 @@ export function assembleEventFromSupabase(eventRow, detail) {
     const label = m.planners?.display_name || m.planners?.email || "Unknown";
     return `${label} (${m.member_role === "lead" ? "Lead" : "Support"})`;
   });
+
+  // Same roster as `team` above, but keeping the real planner id — `team`
+  // is just display strings and can't be used to appoint someone to a
+  // restricted task or resolve who "Jane (Lead)" actually refers to.
+  const teamMembers = detail.members.map((m) => ({
+    id: m.planner_id,
+    name: m.planners?.display_name || m.planners?.email || "Unknown",
+    role: m.member_role,
+  }));
 
   const proposalItems = detail.proposalItems.map((pi) => ({
     id: pi.id, label: pi.label, qty: pi.qty, unitCost: pi.unit_cost,
@@ -34,6 +56,7 @@ export function assembleEventFromSupabase(eventRow, detail) {
     venue: eventRow.venue || "TBD",
     status: eventRow.status,
     team,
+    teamMembers,
     phases,
     budget: {
       total: eventRow.budget_total || 0,
@@ -50,7 +73,7 @@ export function assembleEventFromSupabase(eventRow, detail) {
       : { items: proposalItems, status: "draft", sentAt: null, approvedAt: null, disapprovedAt: null },
     approvals: detail.approvals.map((a) => ({
       id: a.id, label: a.label, description: a.description,
-      status: a.status, requestedAt: a.requested_at, approvedAt: a.approved_at,
+      status: a.status, requestedAt: a.requested_at, approvedAt: a.approved_at, disapprovedAt: a.disapproved_at,
     })),
     vendors: detail.vendors.map((v) => ({
       id: v.id, name: v.name, category: v.category, contact: v.contact, phone: v.phone, cost: v.cost, status: v.status,
@@ -58,6 +81,10 @@ export function assembleEventFromSupabase(eventRow, detail) {
     messages: detail.messages.map((m) => ({
       id: m.id, authorType: m.author_type, authorName: m.author_name,
       body: m.body, imageData: m.image_url || undefined, timestamp: m.created_at,
+    })),
+    taskRequests: (detail.taskRequests || []).map((r) => ({
+      id: r.id, label: r.label, description: r.description, status: r.status,
+      requestedAt: r.requested_at, resolvedAt: r.resolved_at, resolvedTaskId: r.resolved_task_id,
     })),
   };
 }

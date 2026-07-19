@@ -8,7 +8,9 @@
 //
 // Deploy with: supabase functions deploy invite-planner
 // Shares the same secrets as invite-client (SUPABASE_SERVICE_ROLE_KEY,
-// SUPABASE_URL, SUPABASE_ANON_KEY) — no new secrets to set.
+// SUPABASE_URL, SUPABASE_ANON_KEY) — these are reserved names Supabase
+// injects automatically into every Edge Function, so there's nothing to
+// set by hand here.
 
 import { serve } from "https://deno.land/std@0.203.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";

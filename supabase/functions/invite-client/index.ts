@@ -15,8 +15,12 @@
 import { serve } from "https://deno.land/std@0.203.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
+// SUPABASE_URL, SUPABASE_ANON_KEY, and SUPABASE_SERVICE_ROLE_KEY are reserved
+// names Supabase injects into every Edge Function automatically — do not
+// `supabase secrets set` these yourself (it will fail/be ignored). The only
+// secret this function needs set by hand is APP_URL.
 const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!; // set via `supabase secrets set`
+const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 // Required for browser calls: the frontend runs on a different origin
 // (your Vercel/Netlify domain) than this function (*.supabase.co), so the

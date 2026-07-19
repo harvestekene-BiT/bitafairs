@@ -54,7 +54,11 @@ export async function signOut() {
 export async function getCurrentPlanner() {
   const { data: { user } } = await requireSupabase().auth.getUser();
   if (!user) return null;
-  const { data, error } = await requireSupabase().from("planners").select("*").eq("id", user.id).single();
+  // maybeSingle, not single — a planner removed by an admin (see removePlanner
+  // below) has no row here anymore, and that must come back as null, not a
+  // thrown "no rows" Postgres error, so the caller's own "no planner profile"
+  // message is what the person actually sees.
+  const { data, error } = await requireSupabase().from("planners").select("*").eq("id", user.id).maybeSingle();
   if (error) throw error;
   return data; // includes .role ('admin' | 'team') and .organization_id
 }
@@ -106,7 +110,7 @@ export async function fetchEvents() {
 }
 
 export async function fetchEventDetail(eventId) {
-  const [phases, tasks, proposal, proposalItems, approvals, vendors, budgetItems, messages, members] = await Promise.all([
+  const [phases, tasks, proposal, proposalItems, approvals, vendors, budgetItems, messages, members, taskRequests] = await Promise.all([
     requireSupabase().from("phases").select("*").eq("event_id", eventId).order("position"),
     requireSupabase().from("tasks").select("*").in(
       "phase_id",
@@ -115,13 +119,25 @@ export async function fetchEventDetail(eventId) {
     requireSupabase().from("proposals").select("*").eq("event_id", eventId).maybeSingle(),
     requireSupabase().from("proposal_items").select("*").eq("event_id", eventId),
     requireSupabase().from("approvals").select("*").eq("event_id", eventId).order("requested_at"),
-    requireSupabase().from("vendors").select("*").eq("event_id", eventId), // empty array for clients — no policy grants them rows
-    requireSupabase().from("budget_items").select("*").eq("event_id", eventId), // empty array for clients — no policy grants them rows either
+    requireSupabase().from("vendors").select("*").eq("event_id", eventId), // clients can read these too — see 0009_client_vendors_budget.sql
+    requireSupabase().from("budget_items").select("*").eq("event_id", eventId), // clients can read these too — see 0009_client_vendors_budget.sql
     requireSupabase().from("messages").select("*").eq("event_id", eventId).order("created_at"),
-    // Empty for clients too — event_members has no client-facing policy, which is fine
-    // since only Studio needs the team roster for task assignment.
-    requireSupabase().from("event_members").select("member_role, planners(email, display_name)").eq("event_id", eventId),
+    // planner_id is required here (not just email/display_name) so the UI
+    // can appoint specific people to a restricted task — see task_assignees.
+    requireSupabase().from("event_members").select("planner_id, member_role, planners(email, display_name)").eq("event_id", eventId),
+    // Empty for team members, planner-and-up + client-owned rows only —
+    // see 0011_client_task_requests.sql.
+    requireSupabase().from("task_requests").select("*").eq("event_id", eventId).order("requested_at", { ascending: false }),
   ]);
+
+  // task_assignees isn't scoped by event_id directly (it hangs off tasks),
+  // so fetch it keyed to the task ids we actually got back — RLS still
+  // filters this to rows the caller is allowed to see either way.
+  const taskIds = (tasks.data ?? []).map((t) => t.id);
+  const taskAssignees = taskIds.length
+    ? await requireSupabase().from("task_assignees").select("task_id, planner_id").in("task_id", taskIds)
+    : { data: [] };
+
   return {
     phases: phases.data ?? [],
     tasks: tasks.data ?? [],
@@ -132,6 +148,8 @@ export async function fetchEventDetail(eventId) {
     budgetItems: budgetItems.data ?? [],
     messages: messages.data ?? [],
     members: members.data ?? [],
+    taskRequests: taskRequests.data ?? [],
+    taskAssignees: taskAssignees.data ?? [],
   };
 }
 
@@ -181,6 +199,26 @@ export async function releaseApprovalToClient(approvalId) {
 export async function clientApproveMilestone(approvalId) {
   const { error } = await requireSupabase().from("approvals").update({ status: "approved" }).eq("id", approvalId);
   if (error) throw error; // trigger rejects this unless caller is the invited client and status is 'pending'
+}
+
+/* ---------------- Realtime ---------------- */
+// See 0015_realtime.sql for enabling this on the Postgres side.
+
+// One always-on subscription covering messages, proposals, approvals, and
+// task_requests. No event_id filter is needed: Realtime evaluates each
+// table's existing RLS SELECT policy per connected user on every change,
+// so a planner only ever receives rows for their org's events and a
+// client only ever receives rows for their one event — same scoping as a
+// normal query, just pushed immediately instead of waiting for the next
+// fetch. Returns an unsubscribe function.
+export function subscribeToActivity(onChange) {
+  const tables = ["messages", "proposals", "approvals", "task_requests"];
+  let channel = requireSupabase().channel("bitaffairs-activity");
+  for (const table of tables) {
+    channel = channel.on("postgres_changes", { event: "*", schema: "public", table }, (payload) => onChange(table, payload));
+  }
+  channel.subscribe();
+  return () => requireSupabase().removeChannel(channel);
 }
 
 export async function sendMessage(eventId, authorType, authorName, body, imageUrl) {
@@ -257,6 +295,15 @@ export async function fetchTeamMembers() {
 
 export async function updatePlannerRole(plannerId, role) {
   const { error } = await requireSupabase().from("planners").update({ role }).eq("id", plannerId);
+  if (error) throw error;
+}
+
+// Removes a teammate's Studio access. Does not touch their underlying auth
+// account — see 0010_remove_planner.sql for why that's enough, and for the
+// server-side guards (can't remove yourself, can't remove the last admin)
+// that make this safe to call directly from the client.
+export async function removePlanner(plannerId) {
+  const { error } = await requireSupabase().from("planners").delete().eq("id", plannerId);
   if (error) throw error;
 }
 
@@ -362,12 +409,57 @@ export async function deleteEvent(eventId) {
 // Admin-only at the database level too — see the split insert/delete
 // policies on "tasks" in 0005_admin_controls.sql. Team members can still
 // toggle done/assignee on existing tasks (that policy is unchanged).
-export async function addTask(phaseId, label) {
-  const { error } = await requireSupabase().from("tasks").insert({ phase_id: phaseId, label, done: false });
+// Pass { visibility: "restricted", assigneePlannerIds: [...] } to create a
+// task only admins and those specific planners can see or manage — see
+// 0012_restricted_tasks.sql. Two calls, not one transaction (same
+// trade-off noted on createEvent above) — if the second call fails the
+// task exists but with no appointees, which for a restricted task simply
+// means only admins can see it until someone is added.
+export async function addTask(phaseId, label, { visibility = "team", assigneePlannerIds = [] } = {}) {
+  const { data, error } = await requireSupabase()
+    .from("tasks")
+    .insert({ phase_id: phaseId, label, done: false, visibility })
+    .select()
+    .single();
   if (error) throw error;
+
+  if (visibility === "restricted" && assigneePlannerIds.length > 0) {
+    const { error: assigneeError } = await requireSupabase()
+      .from("task_assignees")
+      .insert(assigneePlannerIds.map((plannerId) => ({ task_id: data.id, planner_id: plannerId })));
+    if (assigneeError) throw assigneeError;
+  }
+  return data;
 }
 
 export async function deleteTask(taskId) {
   const { error } = await requireSupabase().from("tasks").delete().eq("id", taskId);
   if (error) throw error;
+}
+
+/* ---------------- Client task requests ---------------- */
+// Clients propose, admins dispose — see 0011_client_task_requests.sql.
+
+export async function requestTask(eventId, label, description) {
+  const { error } = await requireSupabase().from("task_requests").insert({ event_id: eventId, label, description });
+  if (error) throw error;
+}
+
+export async function dismissTaskRequest(requestId) {
+  const { error } = await requireSupabase().from("task_requests").update({ status: "dismissed" }).eq("id", requestId);
+  if (error) throw error; // trigger rejects this unless caller is an admin and the request is still pending
+}
+
+// Turns a request into a real task on the chosen phase, then marks the
+// request approved and links it to the task it became. Admin-only, same
+// as addTask itself — the request-approval policy just gates the status
+// update; the tasks insert policy independently gates the task creation.
+export async function approveTaskRequest(requestId, phaseId, label) {
+  const task = await addTask(phaseId, label);
+  const { error } = await requireSupabase()
+    .from("task_requests")
+    .update({ status: "approved", resolved_task_id: task.id })
+    .eq("id", requestId);
+  if (error) throw error;
+  return task;
 }

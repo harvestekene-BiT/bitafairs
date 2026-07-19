@@ -6,8 +6,8 @@ Event production studio + client approval portal. React + Vite frontend, Supabas
 
 ## What this is
 
-- **Studio** — the agency's dashboard: create projects, manage tasks, proposals, vendors, budgets, and a client-facing message thread. Two internal roles: **Team member** (work goes to an admin for review before reaching a client) and **Admin** (reviews and releases work, oversees an approvals queue across every project).
-- **Client portal** — a scoped view for exactly one event: timeline, proposal, approvals (with a brass "stamp" approval interaction), and messages. Clients sign in with a passwordless magic-link email, never a password.
+- **Studio** — the agency's dashboard: create projects, manage tasks, proposals, vendors, budgets, and a client-facing message thread. Two internal roles: **Team member** (work goes to an admin for review before reaching a client) and **Admin** (reviews and releases work, oversees an approvals queue across every project, manages team membership). Admins can mark a task private — visible and manageable only by admins and whichever team members they appoint — and can turn a client's task request into a real checklist item.
+- **Client portal** — a scoped view for exactly one event: timeline, proposal, approvals (with a brass "stamp" approval interaction), vendors, budget, messages, and task requests. Clients can propose a task for the checklist; an admin decides whether it's added. Vendors and budget are read-only for clients — the same figures the agency sees, but only planners can add a vendor, change a vendor's status, or edit a budget line. Clients sign in with a passwordless magic-link email, never a password.
 
 ---
 
@@ -19,13 +19,20 @@ You'll need a free [Supabase](https://supabase.com) account and, for one step, t
 
 2. **Run the database migrations.** In the Supabase dashboard, open the **SQL Editor**, and run each file in `supabase/migrations/` **in this exact order** (paste the contents of each file into a new query and run it):
    - `0001_init.sql` — creates every table (organizations, planners, events, client access, tasks, proposals, approvals, vendors, budget items, messages)
-   - `0002_rls.sql` — Row Level Security policies: planners see only their org's events, clients see only their one event, vendors are never exposed to clients
+   - `0002_rls.sql` — Row Level Security policies: planners see only their org's events, clients see only their one event
    - `0003_triggers.sql` — database triggers that enforce the admin-approval gate as a real rule (a non-admin's request to "send to client" is rejected by Postgres itself, not just hidden by the UI)
    - `0004_fix_recursion.sql` — fixes a policy bug from an earlier pass (self-referential RLS check on the planners table caused "infinite recursion detected")
    - `0005_admin_controls.sql` — restricts project deletion and adding/removing tasks to admins only, at the database level (team members can still update existing tasks — toggle done, reassign)
    - `0006_disapproval.sql` — lets clients request changes (not just approve) on a sent proposal, and makes approved/disapproved proposals editable again
    - `0007_vendor_phone.sql` — adds a phone number field to vendors
    - `0008_client_code_login.sql` — lets an admin generate a short access code so a client can log in without email. **After running this file, also go to Authentication → Providers in the Supabase dashboard and enable "Anonymous Sign-ins"** — code login depends on it and will fail with an auth error until it's turned on.
+   - `0009_client_vendors_budget.sql` — lets clients read (never write) vendor and budget rows for their own event, the same information the Studio side sees. Previously these two tables had no client-facing policy at all.
+   - `0010_remove_planner.sql` — lets an admin remove a teammate's Studio access. Enforced in Postgres: an admin can never remove themselves, and an org can never be left with zero admins.
+   - `0011_client_task_requests.sql` — lets a client propose a task for their event's checklist. It lands in a review queue, not directly on the plan — an admin decides whether to add it (`0012` covers who can then see it) or dismiss it.
+   - `0012_restricted_tasks.sql` — lets an admin mark a task "private": visible and editable only by admins and whichever team members the admin specifically appoints, never by the client. Regular tasks are unaffected.
+   - `0013_approval_disapproval.sql` — lets a client disapprove (request changes on) a released milestone approval, not just approve it — the same approve/disapprove pair proposals already had. An admin can re-release a disapproved approval to the client once it's addressed.
+   - `0014_fix_client_proposal_approval_updates.sql` — **fixes a real bug**: the client's approve/disapprove actions on proposals and approvals had a SELECT policy and a state-machine trigger, but no RLS UPDATE policy was ever granted, so every client approve/disapprove call was silently updating 0 rows. Also fixes the client's proposal SELECT policy, which never included the `disapproved` status added in `0006`, so a disapproved proposal would disappear from the client's own query.
+   - `0015_realtime.sql` — adds `messages`, `proposals`, `approvals`, and `task_requests` to the `supabase_realtime` publication, so both sides of the app get live updates without a page refresh (see "Realtime" below).
 
 3. **Deploy the Edge Functions.** These are the operations that need elevated privileges — inviting a client, inviting a teammate — so they must run server-side, never in the browser:
    ```bash
@@ -33,11 +40,9 @@ You'll need a free [Supabase](https://supabase.com) account and, for one step, t
    supabase link --project-ref your-project-ref   # find this in your project's dashboard URL
    supabase functions deploy invite-client
    supabase functions deploy invite-planner
-   supabase secrets set SUPABASE_ANON_KEY=your-publishable-key
-   supabase secrets set SUPABASE_SERVICE_ROLE_KEY=your-secret-key
    supabase secrets set APP_URL=https://your-eventual-deployed-url.com
    ```
-   Get the two key values from Project Settings → API Keys: use the **Publishable key** for `SUPABASE_ANON_KEY` and the **Secret key** for `SUPABASE_SERVICE_ROLE_KEY` (the variable names in the code are the older terminology, but the values are your project's current keys — Supabase's own docs confirm they're interchangeable here). The secret key must never appear in frontend code or get committed to git — this is the one place it's meant to live.
+   Note: you do **not** need to (and can't) manually set `SUPABASE_URL`, `SUPABASE_ANON_KEY`, or `SUPABASE_SERVICE_ROLE_KEY` — every `SUPABASE_`-prefixed name is reserved, and Supabase automatically injects all three into every Edge Function's environment already. Running `supabase secrets set SUPABASE_ANON_KEY=...` will just fail or be ignored; there's nothing to configure there. `APP_URL` is the only secret this project actually needs you to set by hand. The service-role key never appears in frontend code or gets committed to git — it only ever lives in Supabase's own managed environment.
 
 4. **Allow your app's URL for magic-link redirects.** In the dashboard, go to Authentication → URL Configuration, and add:
    - `http://localhost:5173` (for local development)
@@ -140,7 +145,13 @@ One practical tip regardless of which platform you use: **only ever run one proj
 
 ### In place
 - **Real server-side enforcement, not just UI gating.** The admin-approval workflow is enforced by Postgres triggers (`supabase/migrations/0003_triggers.sql`) — a non-admin's request to release work to a client is rejected by the database itself.
-- **Row Level Security everywhere.** Planners can only query their own organization's data; clients can only ever query their one event, and never see vendor details, budgets, or unreleased (draft/pending-review) proposals and approvals — enforced at the database layer, not hidden in the UI.
+- **Row Level Security everywhere.** Planners can only query their own organization's data; clients can only ever query their one event, and never see unreleased (draft/pending-review) proposals and approvals — enforced at the database layer, not hidden in the UI. Clients *can* see vendor details and budget figures for their event (same information the Studio side sees) as of `0009_client_vendors_budget.sql`, but only to read — adding a vendor, changing a vendor's status, or editing budget line items is still planner-only, enforced by the same RLS policies. A task marked "private" (`0012_restricted_tasks.sql`) is invisible even to other team members unless an admin appointed them to it specifically, and is never visible to the client regardless. Only the invited client for an event can approve, disapprove, message, or request a task on that event's portal — enforced by RLS (`0014_fix_client_proposal_approval_updates.sql`), not just by which screen the UI happens to show. When an admin uses "Preview client portal," the UI itself disables those controls too (see `previewMode` on `ClientPortal` in `src/App.jsx`) so the preview can't be mistaken for a way to act as the client.
+
+### Realtime
+
+Proposals, approvals, and messages update live on both the Studio and client side — no page refresh needed — and both sides get a toast notification when something changes on any event they have access to (a planner across their org, a client on their one event). This is powered by Supabase's Postgres Changes: `0015_realtime.sql` adds the relevant tables to the `supabase_realtime` publication, and `subscribeToActivity()` in `src/lib/supabaseClient.js` opens one subscription per session. Realtime evaluates each table's normal RLS SELECT policy per connected user, so this doesn't expose anything a plain query wouldn't already — it just delivers it immediately instead of on next load. Task requests also live-refresh the review queue, without a toast (the toast is scoped to messages/proposals/approvals).
+
+If notifications don't seem to be arriving after running the migrations, check your project's Database → Replication settings in the Supabase dashboard and confirm `messages`, `proposals`, `approvals`, and `task_requests` show as enabled under the `supabase_realtime` publication.
 - **No script-injection vectors.** The app never uses `dangerouslySetInnerHTML`, `eval`, or raw `innerHTML` — all user text goes through React's default output escaping.
 - **Input limits and validation**: message bodies, names, and descriptions are length-capped (`LIMITS` in `src/App.jsx`); uploaded images are validated as image files, capped at 15MB, and resized/compressed client-side.
 - **The service-role key never reaches the browser** — it lives only in the `invite-client` Edge Function's server-side environment.
