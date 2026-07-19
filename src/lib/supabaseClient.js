@@ -201,6 +201,11 @@ export async function clientApproveMilestone(approvalId) {
   if (error) throw error; // trigger rejects this unless caller is the invited client and status is 'pending'
 }
 
+export async function clientDisapproveMilestone(approvalId) {
+  const { error } = await requireSupabase().from("approvals").update({ status: "disapproved" }).eq("id", approvalId);
+  if (error) throw error; // trigger rejects this unless caller is the invited client and status is 'pending'
+}
+
 /* ---------------- Realtime ---------------- */
 // See 0015_realtime.sql for enabling this on the Postgres side.
 
