@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   ChevronLeft, ChevronRight, Plus, X, Users, Calendar, MapPin,
   Circle, CheckCircle2, Send, Stamp, FileText, Lock,
-  Wallet, ListChecks, Eye, Building2, Truck, Printer, Mail, Phone,
+  Wallet, ListChecks, Eye, Building2, Truck, Printer, Mail, Phone, Bell, BellOff,
   MessageCircle, ImagePlus
 } from "lucide-react";
 import {
@@ -24,6 +24,7 @@ import {
   createEvent as sbCreateEvent, inviteClient as sbInviteClient,
   invitePlanner, fetchTeamMembers, updatePlannerRole, removePlanner,
   generateClientCode, redeemClientCode, subscribeToActivity,
+  savePlannerPushSubscription, saveClientPushSubscription,
   deleteEvent as sbDeleteEvent, addTask as sbAddTask, deleteTask as sbDeleteTask,
   requestTask as sbRequestTask, dismissTaskRequest as sbDismissTaskRequest, approveTaskRequest as sbApproveTaskRequest,
   addProposalItem as sbAddProposalItem, updateProposalItem as sbUpdateProposalItem, deleteProposalItem as sbDeleteProposalItem,
@@ -91,6 +92,28 @@ function formatTimestamp(value) {
  * pasted-in walls of text breaking layout, and a basic minimum bar before
  * data is trusted enough to render or persist.
  */
+/* ---------------- Push notifications ---------------- */
+// See 0016_push_notifications.sql and supabase/functions/send-push for the
+// server side of this. This is just the browser-facing half: request
+// permission, subscribe via the already-registered service worker (see
+// main.jsx), hand the subscription to supabaseClient.js to persist.
+
+const VAPID_PUBLIC_KEY = import.meta.env?.VITE_VAPID_PUBLIC_KEY;
+const pushSupported =
+  typeof window !== "undefined" && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+
+// PushManager.subscribe() requires applicationServerKey as raw bytes, not
+// the base64url string VAPID keys are normally shared as — this is the
+// standard conversion (padding restored, url-safe chars swapped back).
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; i++) outputArray[i] = rawData.charCodeAt(i);
+  return outputArray;
+}
+
 const LIMITS = {
   shortText: 120,   // names, labels
   longText: 500,    // descriptions
@@ -3119,7 +3142,7 @@ function ClientInviteLanding({ onBack }) {
 
 /* ---------------- Top Nav ---------------- */
 
-function TopNav({ role, inEvent, onBackToDashboard, onSignOut, isAdmin, isPreview, pendingCount, onOpenQueue, onOpenTeam }) {
+function TopNav({ role, inEvent, onBackToDashboard, onSignOut, isAdmin, isPreview, pendingCount, onOpenQueue, onOpenTeam, pushSupported: showPush, pushPermission, pushSubscribed, onEnablePush }) {
   return (
     <div
       style={{
@@ -3190,6 +3213,24 @@ function TopNav({ role, inEvent, onBackToDashboard, onSignOut, isAdmin, isPrevie
             )}
           </button>
         )}
+        {showPush && !isPreview && (
+          <button
+            onClick={pushPermission === "default" || (pushPermission === "granted" && !pushSubscribed) ? onEnablePush : undefined}
+            title={
+              pushPermission === "granted" && pushSubscribed ? "Notifications are on"
+              : pushPermission === "granted" ? "Permission granted, but setup didn't finish — click to retry"
+              : pushPermission === "denied" ? "Notifications are blocked — enable them in your browser's site settings"
+              : "Turn on notifications"
+            }
+            style={{
+              display: "flex", alignItems: "center", background: "none", border: "none", padding: 4,
+              color: pushPermission === "granted" && pushSubscribed ? COLORS.brass : COLORS.inkFaint,
+              cursor: pushPermission === "default" || (pushPermission === "granted" && !pushSubscribed) ? "pointer" : "default",
+            }}
+          >
+            {pushPermission === "denied" ? <BellOff size={15} /> : <Bell size={15} />}
+          </button>
+        )}
         <button
           onClick={onSignOut}
           style={{
@@ -3238,6 +3279,53 @@ function NotificationToasts({ notifications, onDismiss }) {
   );
 }
 
+function PushNotificationBanner({ onEnable, onDismiss }) {
+  const [enabling, setEnabling] = useState(false);
+  return (
+    <div
+      style={{
+        position: "fixed", bottom: 20, left: 20, zIndex: 999, maxWidth: 320,
+        display: "flex", alignItems: "flex-start", gap: 10, padding: "12px 14px",
+        background: COLORS.card, border: `1px solid ${COLORS.line}`, borderRadius: 6,
+        boxShadow: "0 4px 16px rgba(0,0,0,0.18)", fontFamily: FONT_BODY, fontSize: 13,
+      }}
+    >
+      <Bell size={16} color={COLORS.brass} style={{ flexShrink: 0, marginTop: 1 }} />
+      <div style={{ flex: 1 }}>
+        <div style={{ fontWeight: 600, color: COLORS.ink, marginBottom: 3 }}>Turn on notifications?</div>
+        <div style={{ color: COLORS.inkSoft, fontSize: 12, marginBottom: 8 }}>
+          Get a phone notification for new messages, proposals, and approvals — even when this isn't open.
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            onClick={async () => {
+              setEnabling(true);
+              await onEnable();
+              setEnabling(false);
+            }}
+            disabled={enabling}
+            style={{
+              padding: "6px 12px", borderRadius: 4, border: "none", background: COLORS.brass, color: COLORS.ink,
+              fontFamily: FONT_BODY, fontWeight: 700, fontSize: 12, cursor: enabling ? "default" : "pointer",
+            }}
+          >
+            {enabling ? "Enabling…" : "Enable"}
+          </button>
+          <button
+            onClick={onDismiss}
+            style={{
+              padding: "6px 12px", borderRadius: 4, border: `1px solid ${COLORS.line}`, background: "transparent",
+              color: COLORS.inkSoft, fontFamily: FONT_BODY, fontWeight: 600, fontSize: 12, cursor: "pointer",
+            }}
+          >
+            Not now
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------- Root App ---------------- */
 
 export default function BitAffairs() {
@@ -3253,6 +3341,21 @@ export default function BitAffairs() {
   const [viewingQueue, setViewingQueue] = useState(false);
   const [viewingTeam, setViewingTeam] = useState(false);
   const [notifications, setNotifications] = useState([]);
+  const [pushPermission, setPushPermission] = useState(pushSupported ? Notification.permission : "unsupported");
+  const [pushSubscribed, setPushSubscribed] = useState(() => {
+    try {
+      return localStorage.getItem("bitaffairs-push-subscribed") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [pushBannerDismissed, setPushBannerDismissed] = useState(() => {
+    try {
+      return localStorage.getItem("bitaffairs-push-dismissed") === "1";
+    } catch {
+      return false; // storage blocked (private browsing etc.) — just show the banner every time rather than crash
+    }
+  });
 
   // Refs so the long-lived realtime subscription below always reads the
   // *current* open event / event list without needing to tear down and
@@ -3387,7 +3490,12 @@ export default function BitAffairs() {
         };
         text = byStatus[row.status] || null;
       } else if (table === "approvals") {
-        if (payload.eventType === "INSERT" && row.status === "pending") {
+        // Approvals are created already in review (default status
+        // pending_review), not via a later transition into it like
+        // proposals — so "needs admin review" is the INSERT itself.
+        if (payload.eventType === "INSERT" && row.status === "pending_review") {
+          text = `${eventName}: a new approval was requested for review`;
+        } else if (payload.eventType === "INSERT" && row.status === "pending") {
           text = `${eventName}: a new approval was sent to the client`;
         } else if (payload.eventType === "UPDATE") {
           const byStatus = {
@@ -3741,6 +3849,72 @@ export default function BitAffairs() {
     events.filter((ev) => ev.proposal.status === "pending_review").length +
     events.reduce((sum, ev) => sum + (ev.approvals || []).filter((a) => a.status === "pending_review").length, 0);
 
+  const enableNotifications = async () => {
+    if (!pushSupported || !VAPID_PUBLIC_KEY || !session) return;
+
+    const notifyFailure = (text) => {
+      const id = `${Date.now()}-${Math.random()}`;
+      setNotifications((prev) => [...prev.slice(-19), { id, text }]);
+      setTimeout(() => setNotifications((prev) => prev.filter((n) => n.id !== id)), 7000);
+    };
+
+    const persist = (subscription) =>
+      session.type === "planner"
+        ? savePlannerPushSubscription(session.plannerId, subscription)
+        : saveClientPushSubscription(session.eventId, subscription);
+
+    try {
+      const permission = await Notification.requestPermission();
+      setPushPermission(permission);
+      if (permission !== "granted") return;
+
+      const registration = await navigator.serviceWorker.ready;
+      let subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+      });
+
+      try {
+        await persist(subscription);
+      } catch (err) {
+        // Most likely cause: this exact browser/device already has a
+        // subscription saved under a *different* role (e.g. tested as
+        // admin earlier, now enabling as a client on the same phone) —
+        // RLS correctly refuses to let one identity overwrite another's
+        // row for the same endpoint. Recovering means getting a genuinely
+        // new endpoint: drop this subscription and ask the browser for a
+        // fresh one, which is a plain insert rather than a contested
+        // update, then try exactly once more.
+        await subscription.unsubscribe().catch(() => {});
+        subscription = await registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+        });
+        await persist(subscription);
+      }
+
+      setPushSubscribed(true);
+      try {
+        localStorage.setItem("bitaffairs-push-subscribed", "1");
+      } catch {
+        // storage blocked — subscription still saved server-side, just
+        // won't be remembered as "on" locally across reloads
+      }
+    } catch (err) {
+      console.error("Failed to enable push notifications", err);
+      notifyFailure("Couldn't turn on notifications — please try again in a moment.");
+    }
+  };
+
+  const dismissPushBanner = () => {
+    setPushBannerDismissed(true);
+    try {
+      localStorage.setItem("bitaffairs-push-dismissed", "1");
+    } catch {
+      // storage blocked — banner will just reappear next load, harmless
+    }
+  };
+
   return (
     <div style={{ minHeight: "100vh", background: COLORS.paper, color: COLORS.ink }}>
       <style>{`
@@ -3792,6 +3966,10 @@ export default function BitAffairs() {
           setViewingQueue(false);
           setViewingTeam(true);
         }}
+        pushSupported={pushSupported && Boolean(VAPID_PUBLIC_KEY)}
+        pushPermission={pushPermission}
+        pushSubscribed={pushSubscribed}
+        onEnablePush={enableNotifications}
       />
 
       {!loaded ? null : role === "studio" ? (
@@ -3861,6 +4039,10 @@ export default function BitAffairs() {
         notifications={notifications}
         onDismiss={(id) => setNotifications((prev) => prev.filter((n) => n.id !== id))}
       />
+
+      {pushSupported && VAPID_PUBLIC_KEY && session && !isPreview && pushPermission === "default" && !pushBannerDismissed && (
+        <PushNotificationBanner onEnable={enableNotifications} onDismiss={dismissPushBanner} />
+      )}
     </div>
   );
 }

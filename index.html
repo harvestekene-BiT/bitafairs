@@ -2,10 +2,27 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>BiT Affairs</title>
     <meta name="description" content="Event production studio and client approval portal." />
     <link rel="icon" type="image/png" href="/brand/favicon.png" />
+
+    <!-- PWA installability -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#161616" />
+
+    <!-- Android "Add to Home Screen" -->
+    <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
+
+    <!-- iOS has no manifest support for icons/standalone mode — these are
+         the separate Apple-specific tags Safari actually reads. Without
+         them, "Add to Home Screen" on iPhone uses a screenshot as the icon
+         and opens inside Safari's chrome instead of full-screen. -->
+    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="BiT Affairs" />
   </head>
   <body>
     <div id="root"></div>

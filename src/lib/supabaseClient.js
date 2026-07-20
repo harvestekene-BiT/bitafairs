@@ -206,7 +206,44 @@ export async function clientDisapproveMilestone(approvalId) {
   if (error) throw error; // trigger rejects this unless caller is the invited client and status is 'pending'
 }
 
-/* ---------------- Realtime ---------------- */
+/* ---------------- Push notifications ---------------- */
+// See 0016_push_notifications.sql and supabase/functions/send-push. These
+// two just persist/remove a browser's push subscription — the actual
+// permission prompt and browser-side subscribe() call live in App.jsx,
+// since that's UI-triggered, not a pure data op.
+//
+// Each explicitly nulls the *other* owner column on conflict, not just
+// sets its own — a bare upsert only touches the columns it lists, so
+// without this, the same physical browser being used for both a planner
+// login and (separately) a client login would leave stale data in
+// whichever column it didn't just write, silently violating the
+// "exactly one owner" intent even where RLS happens to allow the write.
+// (In practice RLS usually blocks a same-endpoint cross-owner switch
+// outright — see the retry-with-a-fresh-subscription handling in
+// App.jsx's enableNotifications for how that's actually recovered from.)
+
+export async function savePlannerPushSubscription(plannerId, subscription) {
+  const json = subscription.toJSON();
+  const { error } = await requireSupabase().from("push_subscriptions").upsert(
+    { planner_id: plannerId, event_id: null, endpoint: json.endpoint, p256dh: json.keys.p256dh, auth: json.keys.auth },
+    { onConflict: "endpoint" }
+  );
+  if (error) throw error;
+}
+
+export async function saveClientPushSubscription(eventId, subscription) {
+  const json = subscription.toJSON();
+  const { error } = await requireSupabase().from("push_subscriptions").upsert(
+    { event_id: eventId, planner_id: null, endpoint: json.endpoint, p256dh: json.keys.p256dh, auth: json.keys.auth },
+    { onConflict: "endpoint" }
+  );
+  if (error) throw error;
+}
+
+export async function removePushSubscription(endpoint) {
+  const { error } = await requireSupabase().from("push_subscriptions").delete().eq("endpoint", endpoint);
+  if (error) throw error;
+}
 // See 0015_realtime.sql for enabling this on the Postgres side.
 
 // One always-on subscription covering messages, proposals, approvals, and

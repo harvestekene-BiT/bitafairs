@@ -8,6 +8,7 @@ Event production studio + client approval portal. React + Vite frontend, Supabas
 
 - **Studio** — the agency's dashboard: create projects, manage tasks, proposals, vendors, budgets, and a client-facing message thread. Two internal roles: **Team member** (work goes to an admin for review before reaching a client) and **Admin** (reviews and releases work, oversees an approvals queue across every project, manages team membership). Admins can mark a task private — visible and manageable only by admins and whichever team members they appoint — and can turn a client's task request into a real checklist item.
 - **Client portal** — a scoped view for exactly one event: timeline, proposal, approvals (with a brass "stamp" approval interaction), vendors, budget, messages, and task requests. Clients can propose a task for the checklist; an admin decides whether it's added. Vendors and budget are read-only for clients — the same figures the agency sees, but only planners can add a vendor, change a vendor's status, or edit a budget line. Clients sign in with a passwordless magic-link email, never a password.
+- **Installable + push notifications.** Both Studio and the client portal can be installed to a phone's home screen (PWA — no app store), and both sides get real push notifications for new messages, proposals, and approvals, even when the app isn't open. See "Push notifications" further down for the (one-time, multi-step) setup this needs.
 
 ---
 
@@ -33,6 +34,7 @@ You'll need a free [Supabase](https://supabase.com) account and, for one step, t
    - `0013_approval_disapproval.sql` — lets a client disapprove (request changes on) a released milestone approval, not just approve it — the same approve/disapprove pair proposals already had. An admin can re-release a disapproved approval to the client once it's addressed.
    - `0014_fix_client_proposal_approval_updates.sql` — **fixes a real bug**: the client's approve/disapprove actions on proposals and approvals had a SELECT policy and a state-machine trigger, but no RLS UPDATE policy was ever granted, so every client approve/disapprove call was silently updating 0 rows. Also fixes the client's proposal SELECT policy, which never included the `disapproved` status added in `0006`, so a disapproved proposal would disappear from the client's own query.
    - `0015_realtime.sql` — adds `messages`, `proposals`, `approvals`, and `task_requests` to the `supabase_realtime` publication, so both sides of the app get live updates without a page refresh (see "Realtime" below).
+   - `0016_push_notifications.sql` — creates `push_subscriptions`, where each browser's push endpoint is stored once someone grants notification permission. See "Push notifications" below for the rest of the setup — this migration alone doesn't turn notifications on.
 
 3. **Deploy the Edge Functions.** These are the operations that need elevated privileges — inviting a client, inviting a teammate — so they must run server-side, never in the browser:
    ```bash
@@ -71,10 +73,11 @@ You'll need a free [Supabase](https://supabase.com) account and, for one step, t
    npm install
    cp .env.example .env
    ```
-3. Open `.env` and fill in the two values from step 6 above:
+3. Open `.env` and fill in the values from step 6 above (plus the VAPID public key, if you're setting up push notifications — see "Push notifications" below):
    ```
    VITE_SUPABASE_URL=https://your-project-ref.supabase.co
    VITE_SUPABASE_ANON_KEY=your-anon-public-key
+   VITE_VAPID_PUBLIC_KEY=your-vapid-public-key
    ```
 4. Run it locally:
    ```bash
@@ -93,6 +96,7 @@ You'll need a free [Supabase](https://supabase.com) account and, for one step, t
 3. Before clicking Deploy, add your environment variables (Vercel's project settings → Environment Variables):
    - `VITE_SUPABASE_URL`
    - `VITE_SUPABASE_ANON_KEY`
+   - `VITE_VAPID_PUBLIC_KEY` (only if you've set up push notifications — see below; harmless to leave unset otherwise, notifications just won't be offered)
 4. Click Deploy. You'll get a live URL like `bitaffairs-yourname.vercel.app`.
 5. **Go back to Supabase** (Authentication → URL Configuration) and add this real URL to the allowed redirect list — magic links won't work until you do this.
 6. Also update the Edge Function's `APP_URL` secret to match:
@@ -113,6 +117,7 @@ In Vercel's project settings → Domains, add your own domain (e.g. `app.yourage
 4. Before or right after the first deploy, go to **Site configuration → Environment variables** and add:
    - `VITE_SUPABASE_URL`
    - `VITE_SUPABASE_ANON_KEY`
+   - `VITE_VAPID_PUBLIC_KEY` (only if you've set up push notifications — see below)
 5. **Trigger a new deploy after adding them** — same rule as Vercel: Netlify doesn't rebuild automatically just because you saved new variables. Go to **Deploys** tab → **Trigger deploy → Deploy site**.
 6. You'll get a live URL like `your-site-name.netlify.app`. Add this (and your custom domain, once set up) to Supabase's Authentication → URL Configuration allowed redirect list, same as with Vercel.
 7. Security headers (`public/_headers`) are picked up automatically by Netlify — no extra config needed, unlike the Vercel version which needs `vercel.json`.
@@ -135,7 +140,7 @@ One practical tip regardless of which platform you use: **only ever run one proj
 
 - **Planner sign-up is now in the UI** for adding *additional* teammates (Studio → Team, admin-only) — but the very first admin for a new organization still has to be created manually via the Supabase dashboard/SQL Editor (step 5 in Part 1), since there's no "create your agency from scratch" flow yet.
 - **Mutations re-fetch rather than update optimistically.** Every action (toggling a task, sending a message, etc.) re-fetches that one event from the database afterward instead of patching local state instantly — simpler and more obviously correct for a first real-backend pass, at the cost of a small delay per action.
-- **This has not been run against a live Supabase project** by the person building it — there's no internet access in the environment that generated this code, so the SQL and client code are correct by careful construction and review, not by having actually executed them. Expect to fix something small on first real use; that's normal.
+- **This has now been run against a live Supabase project and deployed** — most of the app has been through several rounds of real fixes since the initial build (see git history / migration comments for specifics on what broke and why). **Push notifications specifically are the newest, least battle-tested piece** — the code is correct by careful construction and cross-checked against Supabase's own documentation, but hasn't yet been exercised against a real deployed instance the way the rest of the app has. Expect to debug something small the first time you actually send one.
 
 ---
 
@@ -152,6 +157,56 @@ One practical tip regardless of which platform you use: **only ever run one proj
 Proposals, approvals, and messages update live on both the Studio and client side — no page refresh needed — and both sides get a toast notification when something changes on any event they have access to (a planner across their org, a client on their one event). This is powered by Supabase's Postgres Changes: `0015_realtime.sql` adds the relevant tables to the `supabase_realtime` publication, and `subscribeToActivity()` in `src/lib/supabaseClient.js` opens one subscription per session. Realtime evaluates each table's normal RLS SELECT policy per connected user, so this doesn't expose anything a plain query wouldn't already — it just delivers it immediately instead of on next load. Task requests also live-refresh the review queue, without a toast (the toast is scoped to messages/proposals/approvals).
 
 If notifications don't seem to be arriving after running the migrations, check your project's Database → Replication settings in the Supabase dashboard and confirm `messages`, `proposals`, `approvals`, and `task_requests` show as enabled under the `supabase_realtime` publication.
+
+### Push notifications (installable app + phone notifications)
+
+Realtime toasts (above) only work while someone has the site open in a tab. This is the separate piece that reaches a phone even when the app is closed: BiT Affairs is a PWA (installable, works offline for the shell, has a real app icon on the home screen) with Web Push wired up for messages, proposals, and approvals.
+
+**The installable-app part needs no setup** — `public/manifest.webmanifest` and `public/sw.js` are already in place and take effect the moment you deploy. On Android, Chrome will offer "Install app" / "Add to Home Screen" automatically. On iPhone, there's no automatic prompt — the person has to open the site in Safari, tap the Share icon, then **Add to Home Screen** themselves. Once installed that way, iOS supports real push notifications too (since iOS 16.4) — but *only* for the installed home-screen version, never for a tab still open in Safari itself.
+
+**Push notifications need a one-time setup**, in this order:
+
+1. **Generate a VAPID key pair.** This project's Edge Function and frontend were built and tested against a real pair generated for you already — if you haven't changed anything, you can use these directly:
+   ```
+   VAPID_PUBLIC_KEY=BPnCMHXgELciGZ5567L6diAihQfMZSypM6C757EAmSh5xi06pHzknemUiky6RTkN7Afq5QwSowkKyxogReqS1j8
+   VAPID_PRIVATE_KEY=Cgm5T5ZN-eRrQ-SQ1n-4Yhb1ploZlEiTar4KSdPvqWQ
+   ```
+   Treat the private key like any other secret (never commit it, never put it in `.env`/frontend code). If you'd rather generate your own pair: `node -e "console.log(require('web-push').generateVAPIDKeys())"` after `npm install web-push` anywhere you have Node — or ask me and I'll generate a fresh one.
+
+2. **Set the public key in your frontend env** — add to `.env` locally and to Vercel/Netlify's environment variables (see Part 2/3 above):
+   ```
+   VITE_VAPID_PUBLIC_KEY=BPnCMHXgELciGZ5567L6diAihQfMZSypM6C757EAmSh5xi06pHzknemUiky6RTkN7Afq5QwSowkKyxogReqS1j8
+   ```
+   This one is safe to expose — it's the public half by design. Remember Vercel/Netlify only pick up new env vars on the *next* deploy, same as the Supabase URL/key.
+
+3. **Set the private key and subject on the Edge Function:**
+   ```bash
+   supabase secrets set VAPID_PUBLIC_KEY=BPnCMHXgELciGZ5567L6diAihQfMZSypM6C757EAmSh5xi06pHzknemUiky6RTkN7Afq5QwSowkKyxogReqS1j8
+   supabase secrets set VAPID_PRIVATE_KEY=Cgm5T5ZN-eRrQ-SQ1n-4Yhb1ploZlEiTar4KSdPvqWQ
+   supabase secrets set VAPID_SUBJECT=mailto:you@youragency.com
+   ```
+   `VAPID_SUBJECT` is a contact the push services (Apple/Google/Mozilla) can reach if there's ever a delivery problem — required by the Web Push spec, not optional. Use a real address you check.
+
+4. **Deploy the Edge Function:**
+   ```bash
+   supabase functions deploy send-push --no-verify-jwt
+   ```
+   The `--no-verify-jwt` flag matters here — this function is called by Supabase's own infrastructure (a Database Webhook, next step), not by a signed-in user's browser, so the normal per-user auth check doesn't apply.
+
+5. **Create three Database Webhooks** so Postgres actually calls `send-push` when something happens. In the Supabase dashboard: **Database → Webhooks → Create a new hook**, three times:
+   | Name | Table | Events | Type | URL |
+   |---|---|---|---|---|
+   | `push-on-message` | `messages` | Insert | Edge Function | `send-push` |
+   | `push-on-proposal` | `proposals` | Update | Edge Function | `send-push` |
+   | `push-on-approval` | `approvals` | Insert, Update | Edge Function | `send-push` |
+
+   For each one, when you pick "Edge Function" as the type and select `send-push`, Supabase shows an "HTTP Headers" section — click **Add new header → Add auth header with service key**. This is what lets `send-push` authenticate the call; without it the function will reject the request.
+
+6. **Run the migration** (if you haven't already as part of the batch above): `0016_push_notifications.sql`.
+
+Once all six steps are done: open the app, sign in, and you (or your client) should see the "Turn on notifications?" banner in the bottom-left corner — click Enable, accept the browser's permission prompt, and that device is registered. A bell icon stays in the header afterward as a permanent status indicator/control. Test it by having someone else send a message or approve something on that event — a real OS-level notification should arrive within a few seconds, even with the site closed.
+
+**Known limitation:** tapping a push notification currently opens the app to wherever it starts (the dashboard, or the client portal root) rather than jumping straight to the specific event/message — the app doesn't have per-page routing yet, so there's no URL to deep-link to. Worth adding later if this becomes annoying in practice.
 - **No script-injection vectors.** The app never uses `dangerouslySetInnerHTML`, `eval`, or raw `innerHTML` — all user text goes through React's default output escaping.
 - **Input limits and validation**: message bodies, names, and descriptions are length-capped (`LIMITS` in `src/App.jsx`); uploaded images are validated as image files, capped at 15MB, and resized/compressed client-side.
 - **The service-role key never reaches the browser** — it lives only in the `invite-client` Edge Function's server-side environment.
