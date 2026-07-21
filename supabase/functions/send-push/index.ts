@@ -141,20 +141,32 @@ Deno.serve(async (req) => {
             { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
             payload
           );
+          return { id: sub.id, ok: true };
         } catch (err: any) {
           // 404/410 means the browser/OS revoked this subscription (user
           // uninstalled, cleared data, etc.) — clean it up rather than
           // retrying it forever on every future notification.
           if (err?.statusCode === 404 || err?.statusCode === 410) {
             await admin.from("push_subscriptions").delete().eq("id", sub.id);
-          } else {
-            throw err;
+            return { id: sub.id, ok: false, reason: "subscription expired, removed" };
           }
+          const reason = `${err?.statusCode ?? "?"} ${err?.body ?? err?.message ?? String(err)}`;
+          console.error("Push send failed for subscription", sub.id, reason);
+          return { id: sub.id, ok: false, reason };
         }
       })
     );
 
-    return new Response(JSON.stringify({ sent: results.length }), { status: 200 });
+    // Real per-subscription outcome, not just a count — a "sent: 2" that
+    // silently meant "2 attempts, both failed" was exactly the kind of
+    // gap that makes a delivery problem impossible to diagnose from the
+    // net._http_response log alone. Every attempt's actual result is now
+    // visible right there instead of needing this file re-read to guess.
+    const outcomes = results.map((r) => (r.status === "fulfilled" ? r.value : { ok: false, reason: String(r.reason) }));
+    return new Response(
+      JSON.stringify({ attempted: outcomes.length, succeeded: outcomes.filter((o) => o.ok).length, outcomes }),
+      { status: 200 }
+    );
   } catch (err) {
     return new Response(JSON.stringify({ error: String(err) }), { status: 500 });
   }

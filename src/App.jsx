@@ -3151,7 +3151,18 @@ function TopNav({ role, inEvent, onBackToDashboard, onSignOut, isAdmin, isPrevie
         borderBottom: `1px solid ${COLORS.line}`,
       }}
     >
-      <div style={{ maxWidth: 920, margin: "0 auto", padding: "16px 20px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+      <div
+        style={{
+          maxWidth: 920, margin: "0 auto", padding: "16px 20px", display: "flex", alignItems: "center", justifyContent: "space-between",
+          // env(safe-area-inset-top) is the Dynamic Island/notch's height —
+          // 0 in a normal browser tab, but real on an installed iOS PWA
+          // (standalone display mode), where there's no browser chrome
+          // left to absorb it. Falls back to 0px on browsers that don't
+          // support env() at all. Requires viewport-fit=cover in
+          // index.html's <meta viewport> tag to take effect — already set.
+          paddingTop: "calc(16px + env(safe-area-inset-top, 0px))",
+        }}
+      >
         <div
           onClick={role === "client" ? undefined : onBackToDashboard}
           style={{ display: "flex", alignItems: "center", gap: 9, cursor: role === "client" ? "default" : "pointer" }}
@@ -3253,7 +3264,7 @@ function NotificationToasts({ notifications, onDismiss }) {
   return (
     <div
       style={{
-        position: "fixed", bottom: 20, right: 20, zIndex: 1000,
+        position: "fixed", bottom: "calc(20px + env(safe-area-inset-bottom, 0px))", right: 20, zIndex: 1000,
         display: "flex", flexDirection: "column", gap: 8, maxWidth: 320,
       }}
     >
@@ -3284,7 +3295,7 @@ function PushNotificationBanner({ onEnable, onDismiss }) {
   return (
     <div
       style={{
-        position: "fixed", bottom: 20, left: 20, zIndex: 999, maxWidth: 320,
+        position: "fixed", bottom: "calc(20px + env(safe-area-inset-bottom, 0px))", left: 20, zIndex: 999, maxWidth: 320,
         display: "flex", alignItems: "flex-start", gap: 10, padding: "12px 14px",
         background: COLORS.card, border: `1px solid ${COLORS.line}`, borderRadius: 6,
         boxShadow: "0 4px 16px rgba(0,0,0,0.18)", fontFamily: FONT_BODY, fontSize: 13,
@@ -3361,6 +3372,15 @@ export default function BitAffairs() {
   // *current* open event / event list without needing to tear down and
   // resubscribe every time they change.
   const openEventIdRef = useRef(openEventId);
+  // Guards restoreSessionFromAuth against running twice concurrently — a
+  // login always triggers Supabase's own onAuthStateChange listener
+  // (below) in addition to whatever explicit code the login form itself
+  // runs, and both used to independently set session/role state and call
+  // loadEventsFromSupabase() (which had no error handling at all) at the
+  // same time. That race is a very plausible cause of a login that lands
+  // in a half-initialized blank state until a refresh forces a single
+  // clean restore.
+  const restoringSessionRef = useRef(false);
   useEffect(() => { openEventIdRef.current = openEventId; }, [openEventId]);
   const clientEventIdRef = useRef(clientEventId);
   useEffect(() => { clientEventIdRef.current = clientEventId; }, [clientEventId]);
@@ -3371,14 +3391,23 @@ export default function BitAffairs() {
   // gets their org's events, a client gets only their one event) and
   // assembles each into the nested shape the rest of the app expects.
   async function loadEventsFromSupabase() {
-    const rows = await sbFetchEvents();
-    const assembled = await Promise.all(
-      rows.map(async (row) => {
-        const detail = await fetchEventDetail(row.id);
-        return assembleEventFromSupabase(row, detail);
-      })
-    );
-    setEvents(assembled);
+    try {
+      const rows = await sbFetchEvents();
+      const assembled = await Promise.all(
+        rows.map(async (row) => {
+          const detail = await fetchEventDetail(row.id);
+          return assembleEventFromSupabase(row, detail);
+        })
+      );
+      setEvents(assembled);
+    } catch (err) {
+      // Previously unhandled entirely — a failure here (network hiccup, a
+      // transient query error) used to propagate up into whichever login
+      // flow called this, potentially leaving session/role already set
+      // but events never loaded: exactly a "logged in, but blank" state.
+      console.error("Failed to load events", err);
+      setEvents([]);
+    }
   }
 
   // Re-fetches just one event after a mutation. Simpler and safer than hand
@@ -3394,29 +3423,39 @@ export default function BitAffairs() {
   }
 
   // Called on load, and whenever Supabase Auth's session changes (covers the
-  // magic-link redirect completing after a client clicks their invite email).
+  // magic-link redirect completing after a client clicks their invite email,
+  // and every explicit sign-in below — signInWithPassword/magic-link/
+  // anonymous sign-in all trigger onAuthStateChange too, so this can end up
+  // called twice in quick succession for the same login; the guard below
+  // makes the second call a no-op instead of a race against the first).
   async function restoreSessionFromAuth() {
-    const plannerProfile = await getCurrentPlanner().catch(() => null);
-    if (plannerProfile) {
-      setSession({
-        type: "planner",
-        orgRole: plannerProfile.role,
-        organizationId: plannerProfile.organization_id,
-        plannerId: plannerProfile.id,
-      });
-      setRole("studio");
-      await loadEventsFromSupabase();
-      return true;
+    if (restoringSessionRef.current) return false;
+    restoringSessionRef.current = true;
+    try {
+      const plannerProfile = await getCurrentPlanner().catch(() => null);
+      if (plannerProfile) {
+        setSession({
+          type: "planner",
+          orgRole: plannerProfile.role,
+          organizationId: plannerProfile.organization_id,
+          plannerId: plannerProfile.id,
+        });
+        setRole("studio");
+        await loadEventsFromSupabase();
+        return true;
+      }
+      const eventIdForClient = await getCurrentClientEvent().catch(() => null);
+      if (eventIdForClient) {
+        setSession({ type: "client", eventId: eventIdForClient });
+        setClientEventId(eventIdForClient);
+        setRole("client");
+        await loadEventsFromSupabase();
+        return true;
+      }
+      return false;
+    } finally {
+      restoringSessionRef.current = false;
     }
-    const eventIdForClient = await getCurrentClientEvent().catch(() => null);
-    if (eventIdForClient) {
-      setSession({ type: "client", eventId: eventIdForClient });
-      setClientEventId(eventIdForClient);
-      setRole("client");
-      await loadEventsFromSupabase();
-      return true;
-    }
-    return false;
   }
 
   useEffect(() => {
@@ -3805,14 +3844,11 @@ export default function BitAffairs() {
                 if (!profile) {
                   throw new Error("Signed in, but this account doesn't have Studio access — it may not have been added yet, or was removed.");
                 }
-                setSession({
-                  type: "planner",
-                  orgRole: profile.role,
-                  organizationId: profile.organization_id,
-                  plannerId: profile.id,
-                });
-                setRole("studio");
-                await loadEventsFromSupabase();
+                // signInPlanner's underlying supabase.auth call also fires
+                // onAuthStateChange, which calls this same function — the
+                // guard inside it means whichever of the two calls gets
+                // there first does the real work, and it only happens once.
+                await restoreSessionFromAuth();
               }}
             />
           )}
@@ -3822,11 +3858,10 @@ export default function BitAffairs() {
           {gateStep === "code" && (
             <CodeLogin
               onBack={() => setGateStep("welcome")}
-              onSuccess={async (eventId) => {
-                setSession({ type: "client", eventId });
-                setClientEventId(eventId);
-                setRole("client");
-                await loadEventsFromSupabase();
+              onSuccess={async () => {
+                // redeemClientCode's anonymous sign-in also fires
+                // onAuthStateChange — same de-duplication as above.
+                await restoreSessionFromAuth();
               }}
             />
           )}
