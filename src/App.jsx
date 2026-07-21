@@ -3372,15 +3372,19 @@ export default function BitAffairs() {
   // *current* open event / event list without needing to tear down and
   // resubscribe every time they change.
   const openEventIdRef = useRef(openEventId);
-  // Guards restoreSessionFromAuth against running twice concurrently — a
-  // login always triggers Supabase's own onAuthStateChange listener
-  // (below) in addition to whatever explicit code the login form itself
-  // runs, and both used to independently set session/role state and call
-  // loadEventsFromSupabase() (which had no error handling at all) at the
-  // same time. That race is a very plausible cause of a login that lands
-  // in a half-initialized blank state until a refresh forces a single
-  // clean restore.
-  const restoringSessionRef = useRef(false);
+  // Guards restoreSessionFromAuth against two concurrent calls doing
+  // duplicate work — a login always triggers Supabase's own
+  // onAuthStateChange listener (below) in addition to whatever explicit
+  // code the login form itself runs, and reopening the app with an
+  // existing session does something similar (onAuthStateChange fires
+  // immediately with the current session the moment it's subscribed to,
+  // alongside the mount effect's own getSession() check). A concurrent
+  // caller must AWAIT the in-flight attempt, not just skip its own —
+  // returning early without waiting was a real bug this shipped with
+  // briefly: whichever caller "lost" the race would proceed as if
+  // restoration were done when it wasn't, letting the app render with
+  // role/session set but events still empty.
+  const restoreSessionPromiseRef = useRef(null);
   useEffect(() => { openEventIdRef.current = openEventId; }, [openEventId]);
   const clientEventIdRef = useRef(clientEventId);
   useEffect(() => { clientEventIdRef.current = clientEventId; }, [clientEventId]);
@@ -3426,36 +3430,41 @@ export default function BitAffairs() {
   // magic-link redirect completing after a client clicks their invite email,
   // and every explicit sign-in below — signInWithPassword/magic-link/
   // anonymous sign-in all trigger onAuthStateChange too, so this can end up
-  // called twice in quick succession for the same login; the guard below
-  // makes the second call a no-op instead of a race against the first).
-  async function restoreSessionFromAuth() {
-    if (restoringSessionRef.current) return false;
-    restoringSessionRef.current = true;
-    try {
-      const plannerProfile = await getCurrentPlanner().catch(() => null);
-      if (plannerProfile) {
-        setSession({
-          type: "planner",
-          orgRole: plannerProfile.role,
-          organizationId: plannerProfile.organization_id,
-          plannerId: plannerProfile.id,
-        });
-        setRole("studio");
-        await loadEventsFromSupabase();
-        return true;
+  // called twice in quick succession for the same login or reload; a
+  // concurrent call reuses the same in-flight promise instead of racing it).
+  function restoreSessionFromAuth() {
+    if (restoreSessionPromiseRef.current) return restoreSessionPromiseRef.current;
+
+    const promise = (async () => {
+      try {
+        const plannerProfile = await getCurrentPlanner().catch(() => null);
+        if (plannerProfile) {
+          setSession({
+            type: "planner",
+            orgRole: plannerProfile.role,
+            organizationId: plannerProfile.organization_id,
+            plannerId: plannerProfile.id,
+          });
+          setRole("studio");
+          await loadEventsFromSupabase();
+          return true;
+        }
+        const eventIdForClient = await getCurrentClientEvent().catch(() => null);
+        if (eventIdForClient) {
+          setSession({ type: "client", eventId: eventIdForClient });
+          setClientEventId(eventIdForClient);
+          setRole("client");
+          await loadEventsFromSupabase();
+          return true;
+        }
+        return false;
+      } finally {
+        restoreSessionPromiseRef.current = null;
       }
-      const eventIdForClient = await getCurrentClientEvent().catch(() => null);
-      if (eventIdForClient) {
-        setSession({ type: "client", eventId: eventIdForClient });
-        setClientEventId(eventIdForClient);
-        setRole("client");
-        await loadEventsFromSupabase();
-        return true;
-      }
-      return false;
-    } finally {
-      restoringSessionRef.current = false;
-    }
+    })();
+
+    restoreSessionPromiseRef.current = promise;
+    return promise;
   }
 
   useEffect(() => {
@@ -4057,7 +4066,7 @@ export default function BitAffairs() {
         ) : (
           <StudioDashboard events={events} isAdmin={isAdmin} onOpen={setOpenEventId} onNewProject={() => setCreatingProject(true)} />
         )
-      ) : (
+      ) : clientEvent ? (
         <ClientPortal
           event={clientEvent}
           previewMode={isPreview}
@@ -4068,6 +4077,15 @@ export default function BitAffairs() {
           onSendMessage={isPreview ? undefined : (message) => handleSendMessage(clientEvent.id, message)}
           onRequestTask={isPreview ? undefined : (label, description) => handleRequestTask(clientEvent.id, label, description)}
         />
+      ) : (
+        // events hasn't finished loading yet for this client session — a
+        // brief, normal state right after login, not an error. Showing
+        // nothing here (rather than crashing on clientEvent.phases etc.)
+        // is what actually fixes "totally blank" — this is the exact spot
+        // that error was coming from.
+        <div style={{ padding: 60, textAlign: "center", fontFamily: FONT_BODY, color: COLORS.inkSoft }}>
+          Loading your event…
+        </div>
       )}
 
       <NotificationToasts
