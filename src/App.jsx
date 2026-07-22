@@ -2,13 +2,13 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   ChevronLeft, ChevronRight, Plus, X, Users, Calendar, MapPin,
   Circle, CheckCircle2, Send, Stamp, FileText, Lock,
-  Wallet, ListChecks, Eye, Building2, Truck, Printer, Mail, Phone, Bell, BellOff,
+  Wallet, ListChecks, Eye, Building2, Truck, Printer, Mail, Phone, Bell, BellOff, Pencil,
   MessageCircle, ImagePlus
 } from "lucide-react";
 import {
   supabase, supabaseConfigured,
   signInPlanner, signOut as sbSignOut, getCurrentPlanner,
-  requestClientMagicLink, getCurrentClientEvent,
+  requestClientMagicLink, claimClientInvites, getCurrentClientEvents,
   fetchEvents as sbFetchEvents, fetchEventDetail,
   toggleTask as sbToggleTask, assignTask as sbAssignTask,
   submitProposalForReview as sbSubmitProposalForReview,
@@ -17,9 +17,10 @@ import {
   clientApproveProposal as sbClientApproveProposal,
   clientDisapproveProposal as sbClientDisapproveProposal,
   requestApproval as sbRequestApproval,
+  updateApproval as sbUpdateApproval, deleteApproval as sbDeleteApproval,
   releaseApprovalToClient as sbReleaseApprovalToClient,
   clientApproveMilestone as sbClientApproveMilestone, clientDisapproveMilestone as sbClientDisapproveMilestone,
-  sendMessage as sbSendMessage,
+  sendMessage as sbSendMessage, deleteMessage as sbDeleteMessage,
   addVendor as sbAddVendor, cycleVendorStatus as sbCycleVendorStatus, updateVendorPhone as sbUpdateVendorPhone,
   createEvent as sbCreateEvent, inviteClient as sbInviteClient,
   invitePlanner, fetchTeamMembers, updatePlannerRole, removePlanner,
@@ -942,7 +943,174 @@ function ProposalView({ proposal, editable, isAdmin, onSubmitReview, onSend, onR
 
 /* ---------------- Approvals ---------------- */
 
-function ApprovalsList({ approvals, editable, isAdmin, onApprove, onDisapprove, onRequest, onRelease }) {
+function ApprovalRow({ a, editable, isAdmin, onApprove, onDisapprove, onRelease, onEdit, onDelete }) {
+  const [editing, setEditing] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [label, setLabel] = useState(a.label);
+  const [desc, setDesc] = useState(a.description || "");
+
+  const smallInputStyle = {
+    fontFamily: FONT_BODY, fontSize: 13, padding: "7px 10px",
+    border: `1px solid ${COLORS.line}`, borderRadius: 4, background: COLORS.card, color: COLORS.ink, outline: "none",
+  };
+
+  // On the Studio side, once resolved, the real outcome (and when it
+  // happened) is more useful than the static request description sitting
+  // there unchanged — this replaces it rather than showing both, so a
+  // resolved approval doesn't read like it's still sitting in review.
+  const subtitle =
+    editable && a.status === "approved" ? `Approved ${formatTimestamp(a.approvedAt)}`
+    : editable && a.status === "disapproved" ? `Changes requested ${formatTimestamp(a.disapprovedAt)}`
+    : a.description;
+
+  if (editing) {
+    return (
+      <div style={{ padding: "16px 0", borderBottom: `1px solid ${COLORS.line}` }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, maxWidth: 420 }}>
+          <input value={label} onChange={(e) => setLabel(e.target.value)} style={smallInputStyle} placeholder="What needs approval?" />
+          <input value={desc} onChange={(e) => setDesc(e.target.value)} style={smallInputStyle} placeholder="Description" />
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              onClick={() => {
+                if (!label.trim()) return;
+                onEdit(a.id, clampText(label, LIMITS.shortText), clampText(desc, LIMITS.longText));
+                setEditing(false);
+              }}
+              style={{
+                padding: "7px 12px", borderRadius: 4, border: "none", background: COLORS.brass, color: COLORS.ink,
+                fontFamily: FONT_BODY, fontWeight: 700, fontSize: 12, cursor: "pointer",
+              }}
+            >
+              Save
+            </button>
+            <button
+              onClick={() => {
+                setLabel(a.label);
+                setDesc(a.description || "");
+                setEditing(false);
+              }}
+              style={{
+                padding: "7px 12px", borderRadius: 4, border: `1px solid ${COLORS.line}`, background: "transparent",
+                color: COLORS.inkSoft, fontFamily: FONT_BODY, fontWeight: 600, fontSize: 12, cursor: "pointer",
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      style={{
+        display: "flex", justifyContent: "space-between", alignItems: "center", gap: 16,
+        padding: "16px 0", borderBottom: `1px solid ${COLORS.line}`, flexWrap: "wrap",
+      }}
+    >
+      <div style={{ flex: 1, minWidth: 200 }}>
+        <div style={{ fontFamily: FONT_BODY, fontSize: 14, fontWeight: 600, color: COLORS.ink }}>{a.label}</div>
+        <div style={{ fontFamily: FONT_BODY, fontSize: 13, color: COLORS.inkSoft, marginTop: 2 }}>{subtitle}</div>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: COLORS.inkFaint, marginTop: 4 }}>
+          Requested {formatTimestamp(a.requestedAt)}
+        </div>
+        {!editable && a.status === "disapproved" && (
+          <div style={{ fontFamily: FONT_BODY, fontSize: 12, color: COLORS.clayDeep, marginTop: 6 }}>
+            You requested changes on {formatTimestamp(a.disapprovedAt)}. Your planner has been notified.
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        {editable ? (
+          a.status === "pending_review" ? (
+            isAdmin ? (
+              <button
+                onClick={() => onRelease(a.id)}
+                style={{
+                  display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 999,
+                  border: "none", background: COLORS.brass, color: COLORS.ink,
+                  fontFamily: FONT_BODY, fontWeight: 700, fontSize: 12, cursor: "pointer", whiteSpace: "nowrap",
+                }}
+              >
+                <Stamp size={12} /> Release to client
+              </button>
+            ) : (
+              <StatusTag status="Awaiting approval" />
+            )
+          ) : a.status === "disapproved" ? (
+            isAdmin ? (
+              <button
+                onClick={() => onRelease(a.id)}
+                style={{
+                  display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 999,
+                  border: "none", background: COLORS.brass, color: COLORS.ink,
+                  fontFamily: FONT_BODY, fontWeight: 700, fontSize: 12, cursor: "pointer", whiteSpace: "nowrap",
+                }}
+              >
+                <Stamp size={12} /> Re-release to client
+              </button>
+            ) : (
+              <StatusTag status="Changes requested" />
+            )
+          ) : (
+            <StatusTag status={a.status === "approved" ? "Final stretch" : "In production"} />
+          )
+        ) : a.status === "disapproved" ? null : (
+          <div style={{ display: "flex", alignItems: "center", gap: 24 }}>
+            <StampButton approved={a.status === "approved"} approvedAt={a.approvedAt} onApprove={() => onApprove(a.id)} />
+            {a.status === "pending" && <DisapproveStampButton onDisapprove={() => onDisapprove(a.id)} />}
+          </div>
+        )}
+
+        {editable && isAdmin && !confirmingDelete && (
+          <div style={{ display: "flex", gap: 4 }}>
+            <button
+              onClick={() => setEditing(true)}
+              title="Edit"
+              style={{ display: "flex", alignItems: "center", background: "none", border: "none", color: COLORS.inkFaint, cursor: "pointer", padding: 4 }}
+            >
+              <Pencil size={14} />
+            </button>
+            <button
+              onClick={() => setConfirmingDelete(true)}
+              title="Delete"
+              style={{ display: "flex", alignItems: "center", background: "none", border: "none", color: COLORS.inkFaint, cursor: "pointer", padding: 4 }}
+            >
+              <X size={15} />
+            </button>
+          </div>
+        )}
+        {editable && isAdmin && confirmingDelete && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontFamily: FONT_BODY, fontSize: 12, color: COLORS.clayDeep, fontWeight: 600, whiteSpace: "nowrap" }}>Delete this?</span>
+            <button
+              onClick={() => onDelete(a.id)}
+              style={{
+                padding: "5px 10px", borderRadius: 4, border: "none", background: COLORS.clay, color: COLORS.card,
+                fontFamily: FONT_BODY, fontWeight: 700, fontSize: 11, cursor: "pointer", whiteSpace: "nowrap",
+              }}
+            >
+              Yes
+            </button>
+            <button
+              onClick={() => setConfirmingDelete(false)}
+              style={{
+                padding: "5px 10px", borderRadius: 4, border: `1px solid ${COLORS.line}`, background: "transparent",
+                color: COLORS.inkSoft, fontFamily: FONT_BODY, fontWeight: 600, fontSize: 11, cursor: "pointer",
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ApprovalsList({ approvals, editable, isAdmin, onApprove, onDisapprove, onRequest, onRelease, onEdit, onDelete }) {
   const [label, setLabel] = useState("");
   const [desc, setDesc] = useState("");
 
@@ -962,71 +1130,17 @@ function ApprovalsList({ approvals, editable, isAdmin, onApprove, onDisapprove, 
         </div>
       )}
       {approvals.map((a) => (
-        <div
+        <ApprovalRow
           key={a.id}
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            gap: 16,
-            padding: "16px 0",
-            borderBottom: `1px solid ${COLORS.line}`,
-            flexWrap: "wrap",
-          }}
-        >
-          <div style={{ flex: 1, minWidth: 200 }}>
-            <div style={{ fontFamily: FONT_BODY, fontSize: 14, fontWeight: 600, color: COLORS.ink }}>{a.label}</div>
-            <div style={{ fontFamily: FONT_BODY, fontSize: 13, color: COLORS.inkSoft, marginTop: 2 }}>{a.description}</div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: COLORS.inkFaint, marginTop: 4 }}>
-              Requested {formatTimestamp(a.requestedAt)}
-            </div>
-            {!editable && a.status === "disapproved" && (
-              <div style={{ fontFamily: FONT_BODY, fontSize: 12, color: COLORS.clayDeep, marginTop: 6 }}>
-                You requested changes on {formatTimestamp(a.disapprovedAt)}. Your planner has been notified.
-              </div>
-            )}
-          </div>
-          {editable ? (
-            a.status === "pending_review" ? (
-              isAdmin ? (
-                <button
-                  onClick={() => onRelease(a.id)}
-                  style={{
-                    display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 999,
-                    border: "none", background: COLORS.brass, color: COLORS.ink,
-                    fontFamily: FONT_BODY, fontWeight: 700, fontSize: 12, cursor: "pointer", whiteSpace: "nowrap",
-                  }}
-                >
-                  <Stamp size={12} /> Release to client
-                </button>
-              ) : (
-                <StatusTag status="Awaiting approval" />
-              )
-            ) : a.status === "disapproved" ? (
-              isAdmin ? (
-                <button
-                  onClick={() => onRelease(a.id)}
-                  style={{
-                    display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 999,
-                    border: "none", background: COLORS.brass, color: COLORS.ink,
-                    fontFamily: FONT_BODY, fontWeight: 700, fontSize: 12, cursor: "pointer", whiteSpace: "nowrap",
-                  }}
-                >
-                  <Stamp size={12} /> Re-release to client
-                </button>
-              ) : (
-                <StatusTag status="Changes requested" />
-              )
-            ) : (
-              <StatusTag status={a.status === "approved" ? "Final stretch" : "In production"} />
-            )
-          ) : a.status === "disapproved" ? null : (
-            <div style={{ display: "flex", alignItems: "center", gap: 24 }}>
-              <StampButton approved={a.status === "approved"} approvedAt={a.approvedAt} onApprove={() => onApprove(a.id)} />
-              {a.status === "pending" && <DisapproveStampButton onDisapprove={() => onDisapprove(a.id)} />}
-            </div>
-          )}
-        </div>
+          a={a}
+          editable={editable}
+          isAdmin={isAdmin}
+          onApprove={onApprove}
+          onDisapprove={onDisapprove}
+          onRelease={onRelease}
+          onEdit={onEdit}
+          onDelete={onDelete}
+        />
       ))}
 
       {editable && (
@@ -1453,8 +1567,10 @@ function authorStyle(authorType) {
   return map[authorType] || map.planner;
 }
 
-function MessageBubble({ msg, onOpenImage }) {
+function MessageBubble({ msg, onOpenImage, canDelete, onDelete }) {
   const s = authorStyle(msg.authorType);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: s.align, marginBottom: 14 }}>
       <div
@@ -1463,6 +1579,7 @@ function MessageBubble({ msg, onOpenImage }) {
           background: s.bg,
           borderRadius: 10,
           padding: msg.imageData ? 8 : "10px 14px",
+          position: "relative",
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3, padding: msg.imageData ? "2px 6px 0" : 0 }}>
@@ -1470,12 +1587,38 @@ function MessageBubble({ msg, onOpenImage }) {
           <span style={{ fontFamily: FONT_BODY, fontSize: 10, fontWeight: 600, color: s.fg, opacity: 0.65, textTransform: "uppercase", letterSpacing: 0.4 }}>
             {s.tag}
           </span>
+          {canDelete && !confirmingDelete && (
+            <button
+              onClick={() => setConfirmingDelete(true)}
+              title="Delete message"
+              style={{ marginLeft: "auto", background: "none", border: "none", color: s.fg, opacity: 0.55, cursor: "pointer", padding: 2, display: "flex" }}
+            >
+              <X size={12} />
+            </button>
+          )}
         </div>
+        {confirmingDelete && (
+          <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 6px 6px", flexWrap: "wrap" }}>
+            <span style={{ fontFamily: FONT_BODY, fontSize: 11, color: COLORS.clayDeep, fontWeight: 600 }}>Delete this?</span>
+            <button
+              onClick={() => onDelete(msg.id)}
+              style={{ padding: "3px 8px", borderRadius: 4, border: "none", background: COLORS.clay, color: COLORS.card, fontFamily: FONT_BODY, fontWeight: 700, fontSize: 10, cursor: "pointer" }}
+            >
+              Yes
+            </button>
+            <button
+              onClick={() => setConfirmingDelete(false)}
+              style={{ padding: "3px 8px", borderRadius: 4, border: `1px solid ${COLORS.line}`, background: "transparent", color: COLORS.inkSoft, fontFamily: FONT_BODY, fontWeight: 600, fontSize: 10, cursor: "pointer" }}
+            >
+              Cancel
+            </button>
+          </div>
+        )}
         {msg.imageData && (
           <img
             src={msg.imageData}
             alt="Shared attachment"
-            onClick={() => onOpenImage(msg.imageData)}
+            onClick={() => onOpenImage(msg)}
             style={{ display: "block", width: "100%", maxWidth: 260, borderRadius: 6, cursor: "zoom-in", marginBottom: msg.body ? 6 : 2 }}
           />
         )}
@@ -1496,7 +1639,7 @@ function MessageBubble({ msg, onOpenImage }) {
  * this prototype — see the auth spec for how a real vendor portal would work).
  * Client passes just themselves, so no picker is shown.
  */
-function MessageThread({ messages, senderOptions, onSend }) {
+function MessageThread({ messages, senderOptions, onSend, onDelete, viewerRole }) {
   const [senderValue, setSenderValue] = useState(senderOptions[0]?.value || "");
   const [body, setBody] = useState("");
   const [pendingImage, setPendingImage] = useState(null);
@@ -1563,7 +1706,13 @@ function MessageThread({ messages, senderOptions, onSend }) {
           </div>
         )}
         {messages.map((m) => (
-          <MessageBubble key={m.id} msg={m} onOpenImage={setLightbox} />
+          <MessageBubble
+            key={m.id}
+            msg={m}
+            onOpenImage={setLightbox}
+            canDelete={Boolean(onDelete) && (viewerRole === "studio" || (viewerRole === "client" && m.authorType === "client"))}
+            onDelete={onDelete}
+          />
         ))}
         <div ref={endRef} />
       </div>
@@ -1636,10 +1785,37 @@ function MessageThread({ messages, senderOptions, onSend }) {
           onClick={() => setLightbox(null)}
           style={{
             position: "fixed", inset: 0, background: "rgba(27,46,40,0.85)", zIndex: 50,
-            display: "flex", alignItems: "center", justifyContent: "center", padding: 24, cursor: "zoom-out",
+            display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16, padding: 24, cursor: "zoom-out",
           }}
         >
-          <img src={lightbox} alt="Shared attachment, enlarged" style={{ maxWidth: "90%", maxHeight: "90%", borderRadius: 6 }} />
+          <img src={lightbox.imageData} alt="Shared attachment, enlarged" style={{ maxWidth: "90%", maxHeight: "80%", borderRadius: 6, cursor: "default" }} onClick={(e) => e.stopPropagation()} />
+          <div style={{ display: "flex", gap: 10 }} onClick={(e) => e.stopPropagation()}>
+            <a
+              href={lightbox.imageData}
+              download={`bitaffairs-image-${lightbox.id}.jpg`}
+              style={{
+                display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", borderRadius: 999,
+                background: COLORS.card, color: COLORS.ink, fontFamily: FONT_BODY, fontWeight: 600, fontSize: 13,
+                textDecoration: "none", cursor: "pointer",
+              }}
+            >
+              Save to device
+            </a>
+            {onDelete && (viewerRole === "studio" || (viewerRole === "client" && lightbox.authorType === "client")) && (
+              <button
+                onClick={() => {
+                  onDelete(lightbox.id);
+                  setLightbox(null);
+                }}
+                style={{
+                  display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", borderRadius: 999,
+                  border: "none", background: COLORS.clay, color: COLORS.card, fontFamily: FONT_BODY, fontWeight: 600, fontSize: 13, cursor: "pointer",
+                }}
+              >
+                <X size={14} /> Delete
+              </button>
+            )}
+          </div>
         </div>
       )}
     </SectionCard>
@@ -2428,7 +2604,7 @@ function RemoveMemberControl({ onRemove }) {
   );
 }
 
-function StudioEventDetail({ event, isAdmin, onBack, onToggleTask, onAssignTask, onAddTask, onDeleteTask, onSubmitProposalReview, onSendProposal, onRejectProposal, onResetProposal, onOpenDocument, onAddProposalItem, onUpdateProposalItem, onDeleteProposalItem, onRequestApproval, onReleaseApproval, onAddVendor, onCycleVendorStatus, onUpdateVendorPhone, onSendMessage, onPreviewClient, onDeleteProject, onApproveTaskRequest, onDismissTaskRequest }) {
+function StudioEventDetail({ event, isAdmin, onBack, onToggleTask, onAssignTask, onAddTask, onDeleteTask, onSubmitProposalReview, onSendProposal, onRejectProposal, onResetProposal, onOpenDocument, onAddProposalItem, onUpdateProposalItem, onDeleteProposalItem, onRequestApproval, onReleaseApproval, onEditApproval, onDeleteApproval, onAddVendor, onCycleVendorStatus, onUpdateVendorPhone, onSendMessage, onDeleteMessage, onPreviewClient, onDeleteProject, onApproveTaskRequest, onDismissTaskRequest }) {
   const [tab, setTab] = useState("overview");
   const pct = progressOf(event);
 
@@ -2548,7 +2724,7 @@ function StudioEventDetail({ event, isAdmin, onBack, onToggleTask, onAssignTask,
         />
       )}
       {tab === "approvals" && (
-        <ApprovalsList approvals={event.approvals} editable isAdmin={isAdmin} onRequest={onRequestApproval} onRelease={onReleaseApproval} />
+        <ApprovalsList approvals={event.approvals} editable isAdmin={isAdmin} onRequest={onRequestApproval} onRelease={onReleaseApproval} onEdit={onEditApproval} onDelete={onDeleteApproval} />
       )}
       {tab === "vendors" && (
         <VendorsView vendors={event.vendors || []} onAddVendor={onAddVendor} onCycleStatus={onCycleVendorStatus} onUpdatePhone={onUpdateVendorPhone} />
@@ -2557,6 +2733,8 @@ function StudioEventDetail({ event, isAdmin, onBack, onToggleTask, onAssignTask,
         <MessageThread
           messages={event.messages || []}
           onSend={onSendMessage}
+          onDelete={onDeleteMessage}
+          viewerRole="studio"
           senderOptions={[
             ...event.team.map((t) => ({ value: `planner:${t}`, label: t.split(" (")[0], authorType: "planner" })),
             ...(event.vendors || []).map((v) => ({ value: `vendor:${v.id}`, label: v.name, authorType: "vendor" })),
@@ -2570,7 +2748,37 @@ function StudioEventDetail({ event, isAdmin, onBack, onToggleTask, onAssignTask,
 
 /* ---------------- Client Portal ---------------- */
 
-function ClientPortal({ event, onToggleTask, onApproveProposal, onDisapproveProposal, onApproveMilestone, onDisapproveMilestone, onSendMessage, onRequestTask, previewMode = false }) {
+function ClientEventPicker({ events, onChoose }) {
+  return (
+    <div style={{ maxWidth: 560, margin: "60px auto", padding: "0 20px" }}>
+      <Eyebrow>Welcome back</Eyebrow>
+      <h2 style={{ fontFamily: FONT_DISPLAY, fontStyle: "italic", fontWeight: 500, fontSize: 26, color: COLORS.ink, margin: "8px 0 20px" }}>
+        Which event would you like to view?
+      </h2>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {events.map((ev) => (
+          <button
+            key={ev.id}
+            onClick={() => onChoose(ev.id)}
+            style={{
+              display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%",
+              padding: "16px 18px", borderRadius: 6, border: `1px solid ${COLORS.line}`, background: COLORS.card,
+              cursor: "pointer", textAlign: "left",
+            }}
+          >
+            <div>
+              <div style={{ fontFamily: FONT_BODY, fontSize: 15, fontWeight: 600, color: COLORS.ink }}>{ev.name}</div>
+              <div style={{ fontFamily: FONT_BODY, fontSize: 12, color: COLORS.inkSoft, marginTop: 2 }}>{ev.type} · {ev.date}</div>
+            </div>
+            <ChevronRight size={16} color={COLORS.inkFaint} />
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ClientPortal({ event, onToggleTask, onApproveProposal, onDisapproveProposal, onApproveMilestone, onDisapproveMilestone, onSendMessage, onDeleteMessage, onRequestTask, previewMode = false }) {
   const pct = progressOf(event);
   // Anything still awaiting internal admin review should look identical to
   // "draft" from the client's point of view — they should never see, or need
@@ -2633,6 +2841,8 @@ function ClientPortal({ event, onToggleTask, onApproveProposal, onDisapproveProp
         <MessageThread
           messages={event.messages || []}
           onSend={onSendMessage || noop}
+          onDelete={previewMode ? undefined : onDeleteMessage}
+          viewerRole="client"
           senderOptions={[{ value: "client", label: event.clientName, authorType: "client" }]}
         />
       </div>
@@ -3449,12 +3659,24 @@ export default function BitAffairs() {
           await loadEventsFromSupabase();
           return true;
         }
-        const eventIdForClient = await getCurrentClientEvent().catch(() => null);
-        if (eventIdForClient) {
-          setSession({ type: "client", eventId: eventIdForClient });
-          setClientEventId(eventIdForClient);
+        // The actual fix for magic-link clients (see 0019) — without this,
+        // client_access.client_user_id never gets set and the lookup below
+        // always comes back empty. Best-effort: a planner or an
+        // access-code client has no unclaimed invited_email row to match,
+        // so this is always safe to call, not just for magic-link.
+        await claimClientInvites().catch(() => null);
+
+        const eventIds = await getCurrentClientEvents().catch(() => []);
+        if (eventIds.length > 0) {
+          setSession({ type: "client", eventId: eventIds[0] });
           setRole("client");
           await loadEventsFromSupabase();
+          // A returning client can now have more than one accessible
+          // event (see 0019) — only auto-select when there's exactly one;
+          // otherwise leave clientEventId unset and let the event-picker
+          // screen (rendered when role is "client" with no clientEventId
+          // chosen yet) decide.
+          if (eventIds.length === 1) setClientEventId(eventIds[0]);
           return true;
         }
         return false;
@@ -3628,7 +3850,11 @@ export default function BitAffairs() {
     try {
       // The DB trigger independently forces status to pending_review unless
       // the caller is really an admin — nothing client-side to gate here.
-      await sbRequestApproval(eventId, label, description || "Awaiting your review");
+      // No default filler text for a blank description anymore — a
+      // synthetic "Awaiting your review" sentence here looked enough like
+      // a real status line that it got mistaken for one once the Studio
+      // side's own status display (below) was added.
+      await sbRequestApproval(eventId, label, description);
       await refreshEvent(eventId);
     } catch (err) {
       console.error("Failed to request approval", err);
@@ -3641,6 +3867,24 @@ export default function BitAffairs() {
       await refreshEvent(eventId);
     } catch (err) {
       console.error("Failed to release approval", err);
+    }
+  };
+
+  const handleEditApproval = async (eventId, approvalId, label, description) => {
+    try {
+      await sbUpdateApproval(approvalId, label, description); // trigger rejects this server-side unless caller is admin
+      await refreshEvent(eventId);
+    } catch (err) {
+      console.error("Failed to edit approval", err);
+    }
+  };
+
+  const handleDeleteApproval = async (eventId, approvalId) => {
+    try {
+      await sbDeleteApproval(approvalId); // trigger rejects this server-side unless caller is admin
+      await refreshEvent(eventId);
+    } catch (err) {
+      console.error("Failed to delete approval", err);
     }
   };
 
@@ -3801,6 +4045,15 @@ export default function BitAffairs() {
     }
   };
 
+  const handleDeleteMessage = async (eventId, messageId) => {
+    try {
+      await sbDeleteMessage(messageId); // RLS allows any Studio user, or a client deleting their own — see 0018
+      await refreshEvent(eventId);
+    } catch (err) {
+      console.error("Failed to delete message", err);
+    }
+  };
+
   const handleCreateProject = async (newEvent) => {
     try {
       const eventId = await sbCreateEvent({
@@ -3880,7 +4133,14 @@ export default function BitAffairs() {
   }
 
   const openEvent = events.find((e) => e.id === openEventId);
-  const clientEvent = events.find((e) => e.id === clientEventId) || events[0];
+  // Only fall back to events[0] when there's genuinely one event to show —
+  // with more than one (a returning client with access to several, see
+  // 0019), silently picking the first would skip the picker below and
+  // just show whichever event happened to load first.
+  const clientEvent = clientEventId
+    ? events.find((e) => e.id === clientEventId)
+    : events.length === 1 ? events[0] : undefined;
+  const needsClientEventChoice = role === "client" && !clientEventId && events.length > 1;
   const isAdmin = session?.type === "planner" && session.orgRole === "admin";
   // Admin clicked "Preview client portal" — same screen, but this is not
   // the actual invited client, so it should be look-only. The real client's
@@ -4010,7 +4270,7 @@ export default function BitAffairs() {
           setViewingQueue(false);
           setViewingTeam(true);
         }}
-        pushSupported={pushSupported && Boolean(VAPID_PUBLIC_KEY)}
+        pushSupported={pushSupported && Boolean(VAPID_PUBLIC_KEY) && !needsClientEventChoice}
         pushPermission={pushPermission}
         pushSubscribed={pushSubscribed}
         onEnablePush={enableNotifications}
@@ -4049,10 +4309,13 @@ export default function BitAffairs() {
             onDeleteProposalItem={(itemId) => handleDeleteProposalItem(openEvent.id, itemId)}
             onRequestApproval={(label, desc) => handleRequestApproval(openEvent.id, label, desc)}
             onReleaseApproval={(approvalId) => handleReleaseApproval(openEvent.id, approvalId)}
+            onEditApproval={(approvalId, label, desc) => handleEditApproval(openEvent.id, approvalId, label, desc)}
+            onDeleteApproval={(approvalId) => handleDeleteApproval(openEvent.id, approvalId)}
             onAddVendor={(vendor) => handleAddVendor(openEvent.id, vendor)}
             onCycleVendorStatus={(vendorId) => handleCycleVendorStatus(openEvent.id, vendorId)}
             onUpdateVendorPhone={(vendorId, phone) => handleUpdateVendorPhone(openEvent.id, vendorId, phone)}
             onSendMessage={(message) => handleSendMessage(openEvent.id, message)}
+            onDeleteMessage={(messageId) => handleDeleteMessage(openEvent.id, messageId)}
             onPreviewClient={() => {
               setClientEventId(openEvent.id);
               setRole("client");
@@ -4066,6 +4329,14 @@ export default function BitAffairs() {
         ) : (
           <StudioDashboard events={events} isAdmin={isAdmin} onOpen={setOpenEventId} onNewProject={() => setCreatingProject(true)} />
         )
+      ) : needsClientEventChoice ? (
+        <ClientEventPicker
+          events={events}
+          onChoose={(eventId) => {
+            setClientEventId(eventId);
+            setSession((prev) => (prev?.type === "client" ? { ...prev, eventId } : prev));
+          }}
+        />
       ) : clientEvent ? (
         <ClientPortal
           event={clientEvent}
@@ -4075,6 +4346,7 @@ export default function BitAffairs() {
           onApproveMilestone={isPreview ? undefined : (approvalId) => handleApproveMilestone(clientEvent.id, approvalId)}
           onDisapproveMilestone={isPreview ? undefined : (approvalId) => handleDisapproveMilestone(clientEvent.id, approvalId)}
           onSendMessage={isPreview ? undefined : (message) => handleSendMessage(clientEvent.id, message)}
+          onDeleteMessage={isPreview ? undefined : (messageId) => handleDeleteMessage(clientEvent.id, messageId)}
           onRequestTask={isPreview ? undefined : (label, description) => handleRequestTask(clientEvent.id, label, description)}
         />
       ) : (
@@ -4093,7 +4365,7 @@ export default function BitAffairs() {
         onDismiss={(id) => setNotifications((prev) => prev.filter((n) => n.id !== id))}
       />
 
-      {pushSupported && VAPID_PUBLIC_KEY && session && !isPreview && pushPermission === "default" && !pushBannerDismissed && (
+      {pushSupported && VAPID_PUBLIC_KEY && session && !isPreview && !needsClientEventChoice && pushPermission === "default" && !pushBannerDismissed && (
         <PushNotificationBanner onEnable={enableNotifications} onDismiss={dismissPushBanner} />
       )}
     </div>

@@ -75,28 +75,42 @@ export async function requestClientMagicLink(email) {
   if (error) throw error;
 }
 
-export async function getCurrentClientEvent() {
+// The missing link that made magic-link login actually work at all — see
+// 0019_client_invite_claim.sql. Call this once right after a magic-link
+// redirect completes, before looking up which event(s) the client has
+// access to. Safe to call every time a session restores (a client with no
+// pending unclaimed invite just gets 0 rows affected, not an error) —
+// and safe to call for a planner or an access-code client too, since
+// neither of those has any unclaimed invited_email row to match.
+export async function claimClientInvites() {
   const { data: { user } } = await requireSupabase().auth.getUser();
-  if (!user) return null;
-  const { data, error } = await supabase
+  if (!user?.email) return;
+  const { error } = await requireSupabase()
     .from("client_access")
-    .select("event_id")
-    .eq("client_user_id", user.id)
-    .maybeSingle();
+    .update({ client_user_id: user.id, accepted_at: new Date().toISOString() })
+    .is("client_user_id", null)
+    .eq("invited_email", user.email.toLowerCase().trim());
   if (error) throw error;
-  if (data?.event_id) return data.event_id;
+}
 
-  // Not a magic-link client — check if this is an anonymous session that
-  // redeemed an access code instead (see 0008_client_code_login.sql).
-  const { data: codeSession, error: codeError } = await supabase
-    .from("client_code_sessions")
-    .select("event_id")
-    .eq("user_id", user.id)
-    .order("redeemed_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (codeError) throw codeError;
-  return codeSession?.event_id ?? null;
+// Plural — a returning client can now be invited to more than one event
+// under the same email (see 0019). Combines magic-link invites
+// (client_access) and access-code redemptions (client_code_sessions),
+// since either can be how a given event was reached, and returns every
+// distinct event_id this authenticated person has access to.
+export async function getCurrentClientEvents() {
+  const { data: { user } } = await requireSupabase().auth.getUser();
+  if (!user) return [];
+
+  const [accessRows, codeRows] = await Promise.all([
+    requireSupabase().from("client_access").select("event_id").eq("client_user_id", user.id),
+    requireSupabase().from("client_code_sessions").select("event_id").eq("user_id", user.id).order("redeemed_at", { ascending: false }),
+  ]);
+  if (accessRows.error) throw accessRows.error;
+  if (codeRows.error) throw codeRows.error;
+
+  const ids = [...(accessRows.data || []), ...(codeRows.data || [])].map((r) => r.event_id);
+  return [...new Set(ids)]; // de-dupe — the same event could in principle show up via both paths
 }
 
 /* ---------------- Events ---------------- */
@@ -191,6 +205,18 @@ export async function requestApproval(eventId, label, description) {
   if (error) throw error;
 }
 
+// Admin-only — see 0018_approval_edit_delete.sql. Editing never touches
+// status; the same row's status field is simply omitted from this update.
+export async function updateApproval(approvalId, label, description) {
+  const { error } = await requireSupabase().from("approvals").update({ label, description }).eq("id", approvalId);
+  if (error) throw error; // trigger rejects this unless caller is an admin
+}
+
+export async function deleteApproval(approvalId) {
+  const { error } = await requireSupabase().from("approvals").delete().eq("id", approvalId);
+  if (error) throw error; // trigger rejects this unless caller is an admin
+}
+
 export async function releaseApprovalToClient(approvalId) {
   const { error } = await requireSupabase().from("approvals").update({ status: "pending" }).eq("id", approvalId);
   if (error) throw error; // trigger rejects this unless caller is an admin
@@ -229,6 +255,7 @@ export async function savePlannerPushSubscription(plannerId, subscription) {
     { onConflict: "endpoint" }
   );
   if (error) throw error;
+  await pruneOldSubscriptions("planner_id", plannerId);
 }
 
 export async function saveClientPushSubscription(eventId, subscription) {
@@ -238,6 +265,36 @@ export async function saveClientPushSubscription(eventId, subscription) {
     { onConflict: "endpoint" }
   );
   if (error) throw error;
+  await pruneOldSubscriptions("event_id", eventId);
+}
+
+// A reinstall (or re-enabling notifications after uninstalling) gets a
+// brand new, entirely unrelated push endpoint every time — there's no way
+// to detect "this is the same physical device as before" from the
+// subscription alone, by design (that's a deliberate Web Push privacy
+// property, not a gap). send-push's own 404/410 cleanup only catches a
+// dead endpoint once a send is actually attempted against it, and in
+// practice a push service can keep accepting sends to a since-abandoned
+// endpoint for a while — so during active testing (reinstalling
+// repeatedly on the same phone), dead rows can pile up faster than that
+// natural cleanup catches them, and every send goes to all of them. This
+// bounds the pile-up directly instead: keep only the N most recent
+// subscriptions per owner, without assuming which ones are "real" vs
+// stale. Legitimate multi-device use (phone + laptop) still works fine as
+// long as someone has this many-or-fewer active devices.
+const MAX_SUBSCRIPTIONS_PER_OWNER = 3;
+
+async function pruneOldSubscriptions(ownerColumn, ownerId) {
+  const { data, error } = await requireSupabase()
+    .from("push_subscriptions")
+    .select("id")
+    .eq(ownerColumn, ownerId)
+    .order("created_at", { ascending: false });
+  if (error || !data) return; // best-effort — never let cleanup failure break the actual subscribe flow
+  const staleIds = data.slice(MAX_SUBSCRIPTIONS_PER_OWNER).map((r) => r.id);
+  if (staleIds.length > 0) {
+    await requireSupabase().from("push_subscriptions").delete().in("id", staleIds);
+  }
 }
 
 export async function removePushSubscription(endpoint) {
@@ -270,6 +327,14 @@ export async function sendMessage(eventId, authorType, authorName, body, imageUr
   if (error) throw error;
 }
 
+// Any Studio user can delete any message (existing "planners manage
+// messages" policy); a client can delete their own — see
+// 0018_approval_edit_delete.sql for the client-side grant.
+export async function deleteMessage(messageId) {
+  const { error } = await requireSupabase().from("messages").delete().eq("id", messageId);
+  if (error) throw error;
+}
+
 /* ---------------- Tasks, vendors, and project creation ---------------- */
 
 /* ---------------- Proposal line items ---------------- */
@@ -296,11 +361,30 @@ export async function deleteProposalItem(itemId) {
   if (error) throw error;
 }
 
+// supabase-js's functions.invoke() only ever gives a generic "Edge
+// Function returned a non-2xx status code" message on failure — the
+// actual reason (which invite-client/invite-planner both carefully return
+// as JSON, e.g. "Only an admin can add team members" or a real Supabase
+// Auth error like "User already registered") sits unread in
+// error.context, the raw Response object. This reads it so the real
+// cause reaches the UI instead of a message that hides it.
+async function functionErrorMessage(error) {
+  try {
+    if (error?.context?.json) {
+      const body = await error.context.json();
+      if (body?.error) return String(body.error);
+    }
+  } catch {
+    // context wasn't valid JSON, or already consumed — fall through
+  }
+  return error?.message || "Something went wrong calling the server.";
+}
+
 export async function inviteClient(eventId, clientEmail) {
   const { data, error } = await requireSupabase().functions.invoke("invite-client", {
     body: { eventId, clientEmail },
   });
-  if (error) throw error;
+  if (error) throw new Error(await functionErrorMessage(error));
   return data;
 }
 
@@ -325,7 +409,7 @@ export async function invitePlanner(email, role) {
   const { data, error } = await requireSupabase().functions.invoke("invite-planner", {
     body: { email, role },
   });
-  if (error) throw error;
+  if (error) throw new Error(await functionErrorMessage(error));
   return data;
 }
 
